@@ -6,7 +6,7 @@
 //! taking at least some number of tricks in the suit, or the most tricks on
 //! average.  Layouts are weighted by vacant places: one giving West `w` of
 //! the `n` missing cards has weight `C(26 - n, 13 - w)` out of
-//! [`TOTAL`]`= C(26, 13)`.
+//! <code>[TOTAL] = C(26, 13)</code>.
 //!
 //! The search is exact.  Instead of a greedy per-branch value — which is *not*
 //! optimal here, because a falsecarding defender spreads one layout's weight
