@@ -1,0 +1,8 @@
+# The global `[build] rustflags = ["-Ctarget-cpu=native"]` in ~/.cargo/config.toml
+# leaks into this wasm cross-compile and corrupts the module's target-feature
+# set, after which wasm-bindgen cannot find its externref glue.  A
+# target-specific `rustflags` replaces the build-level flags entirely (cargo
+# takes the most specific source), so pin the feature the linked std already
+# enables.  Same workaround as pons/web.
+[target.wasm32-unknown-unknown]
+rustflags = ["-Ctarget-feature=+reference-types"]

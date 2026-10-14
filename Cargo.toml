@@ -1,0 +1,19 @@
+[package]
+name = "suit-combination"
+version = "0.1.0"
+authors = ["Chen-Pang He (https://jdh8.org)"]
+edition = "2024"
+rust-version = "1.93"
+description = "Single-dummy suit-combination solver for contract bridge"
+repository = "https://github.com/jdh8/suit-combination"
+license = "Apache-2.0"
+categories = ["game-development"]
+keywords = ["bridge"]
+exclude = ["web", ".github"]
+
+[features]
+serde = ["dep:serde", "contract-bridge/serde"]
+
+[dependencies]
+contract-bridge = "0.1.4"
+serde = { version = "1", features = ["derive"], optional = true }

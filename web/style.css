@@ -1,0 +1,152 @@
+/* Subset of Source Han Sans JP for suits — served from the jdh8.github.io
+   origin (see /fonts/SUITS-README.md), shared by all card sites. */
+@font-face {
+  font-family: "Source Han Suits";
+  font-weight: 1 1000;
+  font-style: oblique -90deg 90deg;
+  src: url("https://jdh8.github.io/fonts/suits.woff2") format("woff2");
+}
+
+/* Kitchen-table bridge, same palette as pons: flat felt, card-paper panels,
+   gold action buttons.  No gradients, no gloss. */
+:root {
+  --spade: #1a1a1a;
+  --heart: #c0392b;
+  --diamond: #e07b00; /* warm orange — never blue */
+  --club: #1e7a45;
+  --felt: #2c7a63;
+  --paper: #fdfdf7;
+  --ink: #222;
+  --gold: #f5c518;
+}
+
+* { box-sizing: border-box; }
+
+body {
+  margin: 0;
+  font: 15px/1.4 "Source Han Suits", system-ui, sans-serif;
+  color: #f2f2f2;
+  background: var(--felt);
+  min-height: 100vh;
+}
+
+.hidden { display: none !important; }
+
+header {
+  padding: 0.5rem 1rem;
+  display: flex;
+  align-items: baseline;
+  gap: 1rem;
+  border-bottom: 1px solid rgba(0, 0, 0, 0.2);
+}
+h1 { font-size: 1.2rem; margin: 0; }
+header .tag { opacity: 0.85; font-size: 0.9rem; }
+
+main { max-width: 44rem; margin: 0 auto; padding: 1rem; display: flex; flex-direction: column; gap: 1rem; }
+
+/* Controls row: quiet on the felt; the one gold button is the action. */
+.controls { display: flex; flex-wrap: wrap; gap: 0.8rem; align-items: center; }
+.controls label { display: flex; gap: 0.35rem; align-items: center; font-size: 0.9rem; }
+.controls select,
+.controls input {
+  font: inherit;
+  font-size: 0.9rem;
+  padding: 0.2rem 0.4rem;
+  border: 1px solid rgba(255, 255, 255, 0.35);
+  border-radius: 5px;
+  background: transparent;
+  color: inherit;
+}
+.controls option { color: var(--ink); }
+.boardinfo { opacity: 0.85; font-size: 0.9rem; }
+.boardinfo.error { color: #ffb3a7; opacity: 1; }
+
+button.primary {
+  font: inherit;
+  font-weight: 600;
+  padding: 0.35rem 1rem;
+  border: 0;
+  border-radius: 6px;
+  background: var(--gold);
+  color: var(--ink);
+  cursor: pointer;
+}
+button.primary:hover { background: #ffd83a; }
+button.secondary {
+  font: inherit;
+  font-size: 0.9rem;
+  padding: 0.3rem 0.8rem;
+  border: 1px solid rgba(255, 255, 255, 0.35);
+  border-radius: 6px;
+  background: transparent;
+  color: inherit;
+  cursor: pointer;
+}
+button.secondary:hover { background: rgba(255, 255, 255, 0.12); }
+
+/* Card-paper panels on the felt. */
+.panel {
+  background: var(--paper);
+  color: var(--ink);
+  border-radius: 8px;
+  padding: 0.8rem 1rem;
+  box-shadow: 0 1px 3px rgba(0, 0, 0, 0.35);
+}
+.panel-title {
+  font-size: 0.75rem;
+  text-transform: uppercase;
+  letter-spacing: 0.05em;
+  opacity: 0.65;
+  margin: 0.6rem 0 0.3rem;
+}
+.panel-title:first-child { margin-top: 0; }
+
+/* The two hands: label, suit glyph, then the cards as clickable tiles. */
+.hand { display: flex; align-items: center; gap: 0.5rem; margin: 0.3rem 0; }
+.hand .label { width: 3.6rem; font-size: 0.75rem; font-weight: 700; text-transform: uppercase; letter-spacing: 0.05em; opacity: 0.65; }
+.hand .suit { font-size: 1.5rem; width: 1.4rem; text-align: center; }
+.s-s { color: var(--spade); }
+.s-h { color: var(--heart); }
+.s-d { color: var(--diamond); }
+.s-c { color: var(--club); }
+.cards { display: flex; gap: 0.3rem; flex-wrap: wrap; }
+.card {
+  font: inherit;
+  font-weight: 700;
+  font-size: 1.15rem;
+  width: 2.3rem;
+  height: 3rem;
+  border: 1px solid rgba(0, 0, 0, 0.25);
+  border-radius: 5px;
+  background: #fff;
+  color: var(--ink);
+  box-shadow: 0 1px 2px rgba(0, 0, 0, 0.3);
+  cursor: pointer;
+  transition: transform 0.08s, border-color 0.08s;
+}
+.card:hover:not(:disabled) { border-color: var(--gold); transform: translateY(-2px); }
+.card:disabled { cursor: default; }
+.card.best { border: 2px solid var(--club); }
+.card.chosen { background: var(--gold); }
+.question { margin: 0.6rem 0 0; font-weight: 600; }
+
+/* Feedback: verdict, every lead's value, then the optimal line as a tree. */
+.verdict { font-weight: 700; font-size: 1.1rem; margin: 0; }
+.verdict.ok { color: var(--club); }
+.verdict.no { color: var(--heart); }
+table.leads { border-collapse: collapse; }
+table.leads td { padding: 0.1rem 0.7rem 0.1rem 0; }
+table.leads tr.best td { font-weight: 700; }
+table.leads tr.chosen td:first-child::before { content: "→ "; }
+table.leads td.num { text-align: right; font-variant-numeric: tabular-nums; }
+.plan ul { margin: 0.15rem 0; padding-left: 1.3rem; }
+.plan li { margin: 0.1rem 0; }
+.plan .made { color: var(--club); font-weight: 600; }
+.plan .hopeless { opacity: 0.55; }
+.plan .branch { font-weight: 600; }
+.goals { display: flex; flex-wrap: wrap; gap: 0.3rem 1rem; font-size: 0.9rem; opacity: 0.85; }
+.goals .active { opacity: 1; font-weight: 700; }
+
+details.custom summary { cursor: pointer; font-size: 0.9rem; opacity: 0.85; }
+details.custom .controls { margin-top: 0.6rem; }
+.hint { opacity: 0.6; font-style: italic; font-size: 0.9rem; margin: 0; }

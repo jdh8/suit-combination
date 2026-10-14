@@ -1,0 +1,56 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Suit combinations</title>
+  <link rel="stylesheet" href="style.css">
+</head>
+<body>
+  <header>
+    <h1>Suit combinations</h1>
+    <span class="tag">single-dummy practice against perfect defence</span>
+  </header>
+  <main>
+    <div class="controls">
+      <label>Length
+        <select id="length">
+          <option value="7,8,9">7–9 cards</option>
+          <option value="5,6">5–6 cards</option>
+          <option value="7">7 cards</option>
+          <option value="8">8 cards</option>
+          <option value="9">9 cards</option>
+        </select>
+      </label>
+      <label>Goal
+        <select id="goalkind">
+          <option value="any">any</option>
+          <option value="tricks">at least N tricks</option>
+          <option value="expected">most tricks on average</option>
+        </select>
+      </label>
+      <button id="new" class="primary">New problem</button>
+      <span class="boardinfo" id="info"></span>
+    </div>
+
+    <section class="panel" id="table"></section>
+    <section class="panel hidden" id="feedback"></section>
+
+    <details class="custom">
+      <summary>Enter your own combination</summary>
+      <div class="controls">
+        <label>North <input id="c-north" placeholder="AJ52" size="9" autocapitalize="characters"></label>
+        <label>South <input id="c-south" placeholder="K76" size="9" autocapitalize="characters"></label>
+        <label>Tricks <input id="c-goal" placeholder="N, or empty = EV" size="14"></label>
+        <button id="solve" class="secondary">Set problem</button>
+      </div>
+    </details>
+
+    <p class="hint">Unlimited entries, no ruffs, no inference about the enemy
+      hands; the defenders see all four hands.  Odds are a-priori vacant-places
+      weights.  The engine is exact: it searches declarer strategies, not
+      per-branch guesses.</p>
+  </main>
+  <script type="module" src="app.js"></script>
+</body>
+</html>
