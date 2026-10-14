@@ -1,14 +1,15 @@
-// Thin UI over the wasm solver: one `analyze(north, south)` per problem
-// returns every goal's optimal line; JS picks an interesting goal, shows the
-// two hands, and grades the first card the user leads.
-import init, { analyze } from './pkg/suit_combination_web.js';
+// Thin UI over the wasm solver: one `Trainer` per combination returns every
+// goal's optimal line; JS picks an interesting goal, deals the defenders'
+// cards, and plays the suit out, grading each card declarer chooses.
+import init, { Trainer } from './pkg/suit_combination_web.js';
 
-const TOTAL = 10400600; // C(26, 13), the denominator of every score
+const TOTAL = 10400600; // C(26, 13), the denominator of every root score
 const RANKS = '23456789TJQKA'; // index + 2 = rank value used in the JSON
 const SUITS = [['♠', 's-s'], ['♥', 's-h'], ['♦', 's-d'], ['♣', 's-c']];
 const id = (x) => document.getElementById(x);
 
-let problem = null; // { north, south, suit, analysis, all }
+// { trainer, north, south, suit, analysis, all, snap, plays, log, lead, done }
+let problem = null;
 
 async function main() {
   await init();
@@ -53,10 +54,14 @@ function newProblem() {
   const kind = id('goalkind').value;
   for (let attempt = 0; attempt < 200; attempt++) {
     const [north, south] = randomHoldings(lengths[Math.floor(Math.random() * lengths.length)]);
-    const all = JSON.parse(analyze(north, south));
+    const trainer = new Trainer(north, south);
+    const all = JSON.parse(trainer.analyze());
     const goals = all.filter((a) => (kind === 'any' || a.goal.kind === kind) && interesting(a));
-    if (goals.length === 0) continue;
-    setProblem(north, south, all, goals[Math.floor(Math.random() * goals.length)]);
+    if (goals.length === 0) {
+      trainer.free();
+      continue;
+    }
+    setProblem(trainer, north, south, all, goals[Math.floor(Math.random() * goals.length)]);
     return;
   }
   info('Could not find an interesting problem with these settings.', true);
@@ -73,10 +78,13 @@ function customProblem() {
   const north = normalize(id('c-north').value);
   const south = normalize(id('c-south').value);
   const goalText = id('c-goal').value.trim().toLowerCase();
+  let trainer;
   let all;
   try {
-    all = JSON.parse(analyze(north, south));
+    trainer = new Trainer(north, south);
+    all = JSON.parse(trainer.analyze());
   } catch (e) {
+    trainer?.free();
     info(String(e), true);
     return;
   }
@@ -84,17 +92,25 @@ function customProblem() {
   if (goalText === '' || goalText.startsWith('e')) analysis = all.find((a) => a.goal.kind === 'expected');
   else analysis = all.find((a) => a.goal.kind === 'tricks' && a.goal.target === Number(goalText));
   if (!analysis) {
+    trainer.free();
     info(`No such goal: ${goalText}`, true);
     return;
   }
-  setProblem(north, south, all, analysis);
+  setProblem(trainer, north, south, all, analysis);
 }
 
-function setProblem(north, south, all, analysis) {
+function setProblem(trainer, north, south, all, analysis) {
+  problem?.trainer.free();
+  // West's cards in the suit are those among a random 13 of the 26 unseen
+  // cards, so every split comes up with its vacant-places odds.
+  const missing = [...RANKS].filter((c) => !north.includes(c) && !south.includes(c)).map((c) => RANKS.indexOf(c) + 2);
+  const west = fmt(shuffle([...missing, ...Array(26 - missing.length).fill(0)]).slice(0, 13).filter(Boolean));
+  const target = analysis.goal.kind === 'tricks' ? analysis.goal.target : undefined;
+  const snap = JSON.parse(trainer.start(west, target));
   const suit = SUITS[Math.floor(Math.random() * SUITS.length)];
-  problem = { north, south, suit, analysis, all };
+  problem = { trainer, north, south, suit, analysis, all, snap, plays: [...snap.plays], log: [], lead: null, done: false };
   info('');
-  renderTable();
+  render();
   id('feedback').classList.add('hidden');
 }
 
@@ -105,78 +121,170 @@ function info(text, error = false) {
 
 // --- rendering --------------------------------------------------------------
 
-const seatName = { North: 'North', South: 'South' };
-
 function goalText(goal) {
   return goal.kind === 'tricks'
     ? `How do you play for ${goal.target} trick${goal.target === 1 ? '' : 's'}?`
     : 'How do you play for the most tricks on average?';
 }
 
-function value(goal, score) {
-  return goal.kind === 'tricks' ? `${(score / TOTAL * 100).toFixed(1)}%` : `${(score / TOTAL).toFixed(2)} tricks`;
+// `score` out of `weight`: a probability or an expected number of tricks
+function value(goal, score, weight) {
+  return goal.kind === 'tricks' ? `${(score / weight * 100).toFixed(1)}%` : `${(score / weight).toFixed(2)} tricks`;
 }
 
-function renderTable() {
-  const { north, south, suit, analysis } = problem;
+const cardText = (c) => (c === 'T' ? '10' : c);
+const cardsText = (cards) => [...cards].map(cardText).join('/');
+const rankText = (r) => (r === null ? '–' : cardText(RANKS[r - 2]));
+
+function handRow(seat, inner) {
+  const row = document.createElement('div');
+  row.className = 'hand';
+  row.innerHTML = `<span class="label">${seat}</span><span class="suit ${problem.suit[1]}">${problem.suit[0]}</span>`;
+  row.appendChild(inner);
+  return row;
+}
+
+// Declarer's hand as buttons, live when that seat may play
+function declarerRow(seat, cards, live) {
+  const box = document.createElement('span');
+  box.className = 'cards';
+  for (const rank of cards) {
+    const b = document.createElement('button');
+    b.className = 'card';
+    b.textContent = cardText(rank);
+    b.disabled = !live;
+    b.onclick = () => play(rank);
+    box.appendChild(b);
+  }
+  return handRow(seat, box);
+}
+
+// A defender's cards played so far; the one on the table now is marked
+function defenderRow(seat, trick) {
+  const box = document.createElement('span');
+  box.className = 'played';
+  const now = trick.find((p) => p.seat === seat);
+  box.innerHTML = problem.plays
+    .filter((p) => p.seat === seat && p.card !== null)
+    .map((p) => `<span class="${p === now ? 'now' : ''}">${rankText(p.card)}</span>`)
+    .join(' ') || (now ? '<span class="now">–</span>' : '');
+  return handRow(seat, box);
+}
+
+function render() {
+  const { analysis, snap, plays, done, log } = problem;
   const el = id('table');
   el.innerHTML = '';
-  for (const [seat, cards] of [['North', north], ['South', south]]) {
-    const row = document.createElement('div');
-    row.className = 'hand';
-    row.innerHTML = `<span class="label">${seat}</span><span class="suit ${suit[1]}">${suit[0]}</span>`;
-    const box = document.createElement('span');
-    box.className = 'cards';
-    for (const rank of cards) {
-      const b = document.createElement('button');
-      b.className = 'card';
-      b.textContent = rank === 'T' ? '10' : rank;
-      b.dataset.seat = seat;
-      b.dataset.rank = rank;
-      b.onclick = () => grade(seat, rank);
-      box.appendChild(b);
-    }
-    row.appendChild(box);
-    el.appendChild(row);
-  }
+  const playing = !done && !snap.over;
+  const turn = new Set(playing ? snap.moves.map((m) => m.seat) : []);
+  // The trick on the table: the last partial one, or the last complete one
+  // once the suit is played out.
+  const n = plays.length % 4 || (snap.over ? 4 : 0);
+  const trick = plays.slice(plays.length - n);
+
+  el.appendChild(declarerRow('North', snap.north, turn.has('North')));
+  const ew = document.createElement('div');
+  ew.className = 'ew';
+  ew.appendChild(defenderRow('West', trick));
+  ew.appendChild(defenderRow('East', trick));
+  el.appendChild(ew);
+  el.appendChild(declarerRow('South', snap.south, turn.has('South')));
+
   const q = document.createElement('p');
   q.className = 'question';
-  q.textContent = goalText(analysis.goal) + '  Click the card to lead.';
+  q.textContent = goalText(analysis.goal);
   el.appendChild(q);
+
+  const t = document.createElement('p');
+  t.className = 'trick';
+  const number = Math.floor((plays.length - 1) / 4) + 1;
+  t.innerHTML = trick.length
+    ? `Trick ${number}: ${trick.map((p) => `${p.seat[0]} ${rankText(p.card)}`).join(' · ')}`
+    : 'Lead from either hand.';
+  if (playing && trick.length) t.innerHTML += ` — ${[...turn].join(' or ')} to play`;
+  el.appendChild(t);
+
+  const s = document.createElement('p');
+  s.className = 'status';
+  s.innerHTML = `<span>Tricks won: ${snap.won}</span>`
+    + (playing ? `<span>Best from here: ${value(analysis.goal, Math.max(...snap.moves.map((m) => m.score)), snap.weight)}</span>
+      <button class="secondary" id="reveal">Show solution</button>` : '');
+  el.appendChild(s);
+  if (playing) id('reveal').onclick = finish;
+
+  if (log.length) {
+    const ul = document.createElement('ul');
+    ul.className = 'log';
+    ul.innerHTML = log.map((l) => `<li class="${l.ok ? 'ok' : 'no'}">${l.text}</li>`).join('');
+    el.appendChild(ul);
+  }
 }
 
-function grade(seat, rank) {
-  const { analysis, all } = problem;
-  const chosen = analysis.leads.find((l) => l.seat === seat && l.cards.includes(rank));
-  const best = Math.max(...analysis.leads.map((l) => l.score));
-  for (const b of document.querySelectorAll('.card')) {
-    b.disabled = true;
-    const lead = analysis.leads.find((l) => l.seat === b.dataset.seat && l.cards.includes(b.dataset.rank));
-    b.classList.toggle('best', lead.score === best);
-    b.classList.toggle('chosen', lead === chosen);
-  }
-  const fb = id('feedback');
-  fb.classList.remove('hidden');
+// --- play -------------------------------------------------------------------
+
+function play(rank) {
+  const { trainer, snap, analysis, plays, log } = problem;
+  const goal = analysis.goal;
+  const chosen = snap.moves.find((m) => m.cards.includes(rank));
+  const best = Math.max(...snap.moves.map((m) => m.score));
   const ok = chosen.score === best;
+  problem.lead ??= chosen;
+  const alternatives = snap.moves
+    .filter((m) => m.score === best)
+    .map((m) => `${m.seat} ${cardsText(m.cards)}`)
+    .join(' or ');
+  log.push({
+    ok,
+    text: `Trick ${Math.floor(plays.length / 4) + 1}, ${chosen.seat} ${cardText(rank)}: ${value(goal, chosen.score, snap.weight)}`
+      + (ok ? '' : `; best ${value(goal, best, snap.weight)} with ${alternatives}`),
+  });
+  const next = JSON.parse(trainer.play(rank));
+  plays.push(...next.plays);
+  problem.snap = next;
+  render();
+  if (next.over) finish();
+}
+
+// Ends the play (if still going) and shows the full analysis.
+function finish() {
+  const { analysis, all, snap, lead, log } = problem;
+  const goal = analysis.goal;
+  problem.done = true;
+  render();
+  const best = Math.max(...analysis.leads.map((l) => l.score));
+  let verdict;
+  let ok;
+  if (!snap.over) {
+    ok = false;
+    verdict = 'Solution';
+  } else if (goal.kind === 'tricks') {
+    ok = snap.won >= goal.target;
+    verdict = ok ? `✓ Made: ${snap.won} tricks` : `✗ Down: ${snap.won} of ${goal.target} tricks`;
+  } else {
+    ok = log.every((l) => l.ok);
+    verdict = `${snap.won} tricks taken`;
+  }
+  const mistakes = log.filter((l) => !l.ok).length;
+  const played = log.length ? ` — ${mistakes === 0 ? 'every card was best' : `${mistakes} card${mistakes === 1 ? '' : 's'} not best`}` : '';
   const rows = [...analysis.leads]
     .sort((a, b) => b.score - a.score)
-    .map((l) => `<tr class="${l.score === best ? 'best' : ''} ${l === chosen ? 'chosen' : ''}">
-      <td>${seatName[l.seat]}: ${cardsText(l.cards)}</td><td class="num">${value(analysis.goal, l.score)}</td></tr>`)
+    .map((l) => `<tr class="${l.score === best ? 'best' : ''} ${lead && l.seat === lead.seat && l.cards === lead.cards ? 'chosen' : ''}">
+      <td>${l.seat}: ${cardsText(l.cards)}</td><td class="num">${value(goal, l.score, TOTAL)}</td></tr>`)
     .join('');
-  const goals = all.map((a) => `<span class="${a === analysis ? 'active' : ''}">${a.goal.kind === 'tricks' ? `≥${a.goal.target}: ` : 'EV: '}${value(a.goal, a.score)}</span>`).join('');
+  const goals = all.map((a) => `<span class="${a === analysis ? 'active' : ''}">${a.goal.kind === 'tricks' ? `≥${a.goal.target}: ` : 'EV: '}${value(a.goal, a.score, TOTAL)}</span>`).join('');
+  const fb = id('feedback');
+  fb.classList.remove('hidden');
   fb.innerHTML = `
-    <p class="verdict ${ok ? 'ok' : 'no'}">${ok ? '✓ Best play' : '✗ Not the best play'} — ${value(analysis.goal, chosen.score)}${ok ? '' : `, best is ${value(analysis.goal, best)}`}</p>
+    <p class="verdict ${ok ? 'ok' : 'no'}">${verdict}${played}</p>
     <div class="panel-title">Every lead</div>
     <table class="leads">${rows}</table>
     <div class="panel-title">Optimal line</div>
-    <div class="plan"><ul>${planItems(analysis.plan, analysis.goal)}</ul></div>
+    <div class="plan"><ul>${planItems(analysis.plan, goal)}</ul></div>
     <div class="panel-title">This combination</div>
     <div class="goals">${goals}</div>
     <p style="margin:0.8rem 0 0"><button class="primary" id="next">Next problem</button></p>`;
   id('next').onclick = newProblem;
 }
-
-const cardsText = (cards) => [...cards].map((c) => (c === 'T' ? '10' : c)).join('/');
 
 // Flattens declarer's forced sequence into sibling items; a defender's choice
 // opens one nested list per distinct continuation.
@@ -188,13 +296,13 @@ function planItems(plan, goal) {
       return `<li class="hopeless">${goal.kind === 'tricks' ? 'cannot be made from here — play on for what it is worth' : 'no more tricks to be had'}</li>`;
     case 'declarer': {
       const what = plan.cards ? `play the ${cardsText(plan.cards)}` : 'discard';
-      return `<li>${seatName[plan.seat] ?? plan.seat}: ${what}</li>` + planItems(plan.then, goal);
+      return `<li>${plan.seat}: ${what}</li>` + planItems(plan.then, goal);
     }
     case 'defender':
       if (plan.branches.length === 1) return planItems(plan.branches[0][1], goal);
       return plan.branches
         .map(([labels, sub]) => {
-          const cards = labels.map((l) => (l === null ? 'nothing' : RANKS[l - 2] === 'T' ? '10' : RANKS[l - 2])).join('/');
+          const cards = labels.map((l) => (l === null ? 'nothing' : rankText(l))).join('/');
           return `<li><span class="branch">${plan.seat} plays ${cards}:</span><ul>${planItems(sub, goal)}</ul></li>`;
         })
         .join('');

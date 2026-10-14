@@ -150,3 +150,17 @@ table.leads td.num { text-align: right; font-variant-numeric: tabular-nums; }
 details.custom summary { cursor: pointer; font-size: 0.9rem; opacity: 0.85; }
 details.custom .controls { margin-top: 0.6rem; }
 .hint { opacity: 0.6; font-style: italic; font-size: 0.9rem; margin: 0; }
+
+/* Play: the defenders' cards so far, the trick on the table, and a log with
+   one verdict per card declarer chose. */
+.ew { display: flex; flex-wrap: wrap; gap: 0 2rem; }
+.played { font-weight: 600; min-height: 1.4em; }
+.played .now { background: var(--gold); border-radius: 3px; padding: 0 0.25rem; }
+.trick { margin: 0.4rem 0 0; }
+.status { display: flex; flex-wrap: wrap; gap: 0.4rem 1rem; align-items: center; margin: 0.4rem 0 0; font-size: 0.9rem; opacity: 0.85; }
+.status button { padding: 0.15rem 0.6rem; border-color: rgba(0, 0, 0, 0.3); }
+.status button:hover { background: rgba(0, 0, 0, 0.06); }
+.log { list-style: none; margin: 0.6rem 0 0; padding: 0; font-size: 0.9rem; }
+.log li::before { font-weight: 700; }
+.log .ok::before { content: "✓ "; color: var(--club); }
+.log .no::before { content: "✗ "; color: var(--heart); }

@@ -29,7 +29,10 @@ println!("{:.1}%\n{}", a.value() * 100.0, a.plan); // 77.1%, then the line
 ```
 
 `analyze_all` solves every target and the expected-tricks goal in one pass.
-The `serde` feature derives `Serialize` for the result types.
+`Solver` keeps the memo across goals, and `Game` plays the suit out on it
+trick by trick: `moves` scores each card declarer may play now, and `play`
+plays one and lets the engine's defenders answer.  The `serde` feature derives
+`Serialize` for the result types.
 
 ```sh
 cargo run --release --example solve -- AJ52 K76      # all goals
@@ -40,8 +43,11 @@ cargo run --release --example solve -- A943 QT2 ev   # expected tricks
 ## Web trainer
 
 [`web/`](web/) is a wasm front end: it deals a random combination, picks a goal
-worth thinking about, and grades the card you lead, then shows every lead's
-value and the optimal line.
+worth thinking about, and plays the suit out against you.  Every card you
+choose is graded against the best play from the same information; the
+defenders hold a random layout (vacant-places odds) and answer with the card
+that hurts most on it, breaking ties by the most deceptive one.  At the end it
+shows every lead's value and the optimal line.
 
 ```sh
 cd web && wasm-pack build --release --target web && python3 -m http.server 8765
@@ -56,6 +62,4 @@ Deployed to GitHub Pages by [`.github/workflows/pages.yml`](.github/workflows/pa
 Random 7–9 card problems solve in a few milliseconds.  The Pareto search is
 exponential in the worst case: a combination with many separately-ranked
 spot cards (`A862` opposite `J94`) takes a few seconds for the expected-tricks
-goal, during which the page is unresponsive.  The trainer grades the first
-card only; playing the suit out trick by trick against the engine is not
-implemented yet.
+goal, during which the page is unresponsive.

@@ -44,6 +44,10 @@ pub enum Error {
     TooManyMissing,
     /// Target exceeds the longer hand (or is zero)
     BadTarget,
+    /// West was dealt a card North or South holds
+    BadWest,
+    /// The card is not one declarer may play now
+    NotPlayable,
 }
 
 impl fmt::Display for Error {
@@ -52,6 +56,8 @@ impl fmt::Display for Error {
             Self::Overlap => "North and South share a card",
             Self::TooManyMissing => "more than 8 cards missing",
             Self::BadTarget => "target must be 1..=longer hand",
+            Self::BadWest => "West holds a card of North or South",
+            Self::NotPlayable => "that card cannot be played now",
         })
     }
 }
@@ -125,6 +131,14 @@ impl Analysis {
     }
 }
 
+/// One card played in a [`Game`]; `None` = a discard or showing out
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[cfg_attr(feature = "serde", derive(serde::Serialize))]
+pub struct Play {
+    pub seat: Seat,
+    pub card: Option<Rank>,
+}
+
 /// Best line for `goal` with `north` opposite `south`
 pub fn analyze(north: Holding, south: Holding, goal: Goal) -> Result<Analysis, Error> {
     Solver::new(north, south)?.analyze(goal)
@@ -133,12 +147,7 @@ pub fn analyze(north: Holding, south: Holding, goal: Goal) -> Result<Analysis, E
 /// [`analyze`] for every target from one trick up to the longer hand's
 /// length, then for [`Goal::Expected`]
 pub fn analyze_all(north: Holding, south: Holding) -> Result<Vec<Analysis>, Error> {
-    let mut solver = Solver::new(north, south)?;
-    (1..=solver.max_tricks())
-        .map(|target| Goal::Tricks { target })
-        .chain([Goal::Expected])
-        .map(|goal| solver.analyze(goal))
-        .collect()
+    Solver::new(north, south)?.analyze_all()
 }
 
 /// Set of layouts by index
@@ -243,7 +252,7 @@ fn seat(i: u8) -> Seat {
 }
 
 /// Everything declarer knows, which is all that a strategy may depend on
-#[derive(Clone, Copy, PartialEq, Eq, Hash)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 struct State {
     /// Remaining cards of North, South
     ns: [u16; 2],
@@ -398,7 +407,8 @@ impl Structure {
     }
 }
 
-struct Solver {
+/// The search for one combination, memoized across goals and [`Game`]s
+pub struct Solver {
     north: Holding,
     south: Holding,
     missing: u16,
@@ -408,7 +418,7 @@ struct Solver {
 }
 
 impl Solver {
-    fn new(north: Holding, south: Holding) -> Result<Self, Error> {
+    pub fn new(north: Holding, south: Holding) -> Result<Self, Error> {
         if !(north & south).is_empty() {
             return Err(Error::Overlap);
         }
@@ -437,43 +447,71 @@ impl Solver {
         self.north.len().max(self.south.len()) as u8
     }
 
-    fn score(root: &Structure, goal: Goal, v: &Tricks) -> u64 {
-        (0..root.len)
-            .map(|i| match goal {
-                Goal::Tricks { target } => u64::from(v.get(i) >= target) * root.weight[i],
-                Goal::Expected => u64::from(v.get(i)) * root.weight[i],
-            })
-            .sum()
+    fn check(&self, goal: Goal) -> Result<(), Error> {
+        match goal {
+            Goal::Tricks { target } if target == 0 || target > self.max_tricks() => {
+                Err(Error::BadTarget)
+            }
+            _ => Ok(()),
+        }
     }
 
-    fn analyze(&mut self, goal: Goal) -> Result<Analysis, Error> {
-        if let Goal::Tricks { target } = goal
-            && (target == 0 || target > self.max_tricks())
-        {
-            return Err(Error::BadTarget);
-        }
-        let root = State {
+    fn root(&self) -> State {
+        State {
             ns: [self.north.to_bits(), self.south.to_bits()],
             shown: [[0; MAX_MISSING]; 2],
             void: [false; 2],
             leader: NORTH,
             trick: [0; 4],
             played: 0,
-        };
+        }
+    }
+
+    /// Goal score of guaranteeing `v` more tricks after `won`, over the
+    /// layouts `c`
+    fn score(s: &Structure, c: Set, goal: Goal, won: u8, v: &Tricks) -> u64 {
+        c.iter()
+            .map(|i| match goal {
+                Goal::Tricks { target } => u64::from(v.get(i) + won >= target) * s.weight[i],
+                Goal::Expected => u64::from(v.get(i) + won) * s.weight[i],
+            })
+            .sum()
+    }
+
+    /// Best [`score`](Self::score) some continuation from `st` reaches,
+    /// with the vector that reaches it
+    fn value(&mut self, st: State, goal: Goal, won: u8) -> (u64, Tricks) {
+        let s = self.structure(st.live());
+        let c = Self::consistent(&st, &s);
+        self.feasible(st)
+            .into_iter()
+            .map(|v| (Self::score(&s, c, goal, won, &v), v))
+            .max_by_key(|&(x, _)| x)
+            .unwrap_or((0, Tricks::ZERO))
+    }
+
+    /// [`Analysis`] for every target from one trick up to the longer hand's
+    /// length, then for [`Goal::Expected`]
+    pub fn analyze_all(&mut self) -> Result<Vec<Analysis>, Error> {
+        (1..=self.max_tricks())
+            .map(|target| Goal::Tricks { target })
+            .chain([Goal::Expected])
+            .map(|goal| self.analyze(goal))
+            .collect()
+    }
+
+    pub fn analyze(&mut self, goal: Goal) -> Result<Analysis, Error> {
+        self.check(goal)?;
+        let root = self.root();
         let structure = self.structure(root.live());
         let moves = self.declarer_moves(&root, &structure);
         let mut leads = Vec::new();
         let mut best: Option<(u64, Tricks, usize)> = None;
-        for (i, (st, cards)) in moves.iter().enumerate() {
-            let (score, v) = self
-                .feasible(*st)
-                .into_iter()
-                .map(|v| (Self::score(&structure, goal, &v), v))
-                .max_by_key(|&(s, _)| s)
-                .unwrap_or((0, Tricks::ZERO));
+        for (i, &(st, at, cards)) in moves.iter().enumerate() {
+            let (score, v) = self.value(st, goal, 0);
             leads.push(Lead {
-                seat: seat(st.leader),
-                cards: Holding::from_bits_truncate(*cards),
+                seat: seat(at),
+                cards: Holding::from_bits_truncate(cards),
                 score,
             });
             if best.is_none_or(|(s, _, _)| score > s) {
@@ -582,30 +620,37 @@ impl Solver {
         (st, won)
     }
 
-    /// Declarer's options now: (resulting state, equivalence class played).
-    /// Between tricks that includes the choice of hand; at third hand a void
-    /// hand has the single option "discard" (class 0).  Declarer never plays
-    /// fourth, so these moves never complete a trick or change the structure.
-    fn declarer_moves(&mut self, st: &State, s: &Structure) -> Vec<(State, u16)> {
+    /// Declarer's seat `at` plays `rank` (0 = discards) now.  Declarer never
+    /// plays fourth, so this never completes a trick or changes the structure.
+    fn declarer_play(&mut self, st: &State, s: &Structure, at: u8, rank: u8) -> State {
+        let mut ch = *st;
+        if st.played == 0 {
+            ch.leader = at;
+        }
+        ch.ns[at as usize / 2] &= !(1 << rank);
+        self.advance(ch, s, rank).0
+    }
+
+    /// Declarer's options now: (resulting state, seat, equivalence class
+    /// played).  Between tricks that includes the choice of hand; at third
+    /// hand a void hand has the single option "discard" (class 0).
+    fn declarer_moves(&mut self, st: &State, s: &Structure) -> Vec<(State, u8, u16)> {
         let mut out = Vec::new();
         let seats: &[u8] = if st.played == 0 {
             &[NORTH, SOUTH]
         } else {
             &[(st.leader + st.played) % 4]
         };
-        for &seat in seats {
-            let hand = st.ns[seat as usize / 2];
+        for &at in seats {
+            let hand = st.ns[at as usize / 2];
             if hand == 0 {
                 if st.played != 0 {
-                    out.push((self.advance(*st, s, 0).0, 0));
+                    out.push((self.declarer_play(st, s, at, 0), at, 0));
                 }
                 continue;
             }
             for class in Self::classes(st, s, hand) {
-                let mut ch = *st;
-                ch.leader = if st.played == 0 { seat } else { st.leader };
-                ch.ns[seat as usize / 2] &= !(1 << lowest(class));
-                out.push((self.advance(ch, s, lowest(class)).0, class));
+                out.push((self.declarer_play(st, s, at, lowest(class)), at, class));
             }
         }
         out
@@ -661,7 +706,7 @@ impl Solver {
             maximal(
                 moves
                     .into_iter()
-                    .flat_map(|(ch, _)| self.feasible(ch))
+                    .flat_map(|(ch, _, _)| self.feasible(ch))
                     .collect(),
                 s.len,
             )
@@ -720,15 +765,10 @@ impl Solver {
         }
         let c = Self::consistent(&st, &s);
         if Self::is_declarer_turn(&st) {
-            for (ch, cards) in self.declarer_moves(&st, &s) {
+            for (ch, at, cards) in self.declarer_moves(&st, &s) {
                 if self.feasible(ch).iter().any(|v| v.covers(&req, s.len)) {
-                    let seat_index = if st.played == 0 {
-                        ch.leader
-                    } else {
-                        (st.leader + st.played) % 4
-                    };
                     return Plan::Declarer {
-                        seat: seat(seat_index),
+                        seat: seat(at),
                         cards: Holding::from_bits_truncate(cards),
                         then: Box::new(self.plan(ch, req)),
                     };
@@ -766,6 +806,171 @@ impl Solver {
         Plan::Defender {
             seat: seat(seat_index),
             branches,
+        }
+    }
+}
+
+/// The suit played out trick by trick: declarer picks a card at each turn
+/// and the defenders, who hold the actual layout, answer with the card that
+/// hurts most.
+#[derive(Debug, Clone)]
+pub struct Game {
+    goal: Goal,
+    st: State,
+    /// West's cards as dealt
+    west: u16,
+    /// Cards still held by East, West
+    hands: [u16; 2],
+    won: u8,
+}
+
+impl Game {
+    /// Deal `west` the given cards (East gets the rest of the missing ones)
+    /// and play for `goal`
+    pub fn new(solver: &Solver, west: Holding, goal: Goal) -> Result<Self, Error> {
+        solver.check(goal)?;
+        let west = west.to_bits();
+        if west & !solver.missing != 0 {
+            return Err(Error::BadWest);
+        }
+        Ok(Self {
+            goal,
+            st: solver.root(),
+            west,
+            hands: [solver.missing & !west, west],
+            won: 0,
+        })
+    }
+
+    pub fn north(&self) -> Holding {
+        Holding::from_bits_truncate(self.st.ns[0])
+    }
+
+    pub fn south(&self) -> Holding {
+        Holding::from_bits_truncate(self.st.ns[1])
+    }
+
+    pub fn tricks_won(&self) -> u8 {
+        self.won
+    }
+
+    pub fn is_over(&self) -> bool {
+        self.st.played == 0 && self.st.ns == [0; 2]
+    }
+
+    /// Weight (out of [`TOTAL`]) of the layouts consistent with what declarer
+    /// has seen: the denominator of [`Lead::score`] from here
+    pub fn weight(&self, solver: &mut Solver) -> u64 {
+        let s = solver.structure(self.st.live());
+        Solver::consistent(&self.st, &s)
+            .iter()
+            .map(|i| s.weight[i])
+            .sum()
+    }
+
+    /// Declarer's options now, each scored by the best the goal can still
+    /// reach after it; empty once the suit is played out
+    pub fn moves(&self, solver: &mut Solver) -> Vec<Lead> {
+        let s = solver.structure(self.st.live());
+        solver
+            .declarer_moves(&self.st, &s)
+            .into_iter()
+            .map(|(ch, at, cards)| Lead {
+                seat: seat(at),
+                cards: Holding::from_bits_truncate(cards),
+                score: solver.value(ch, self.goal, self.won).0,
+            })
+            .collect()
+    }
+
+    /// Declarer plays `rank`; the defenders answer, and forced declarer cards
+    /// follow, until declarer has a choice again or the suit is played out.
+    /// Returns every card played, in order.
+    pub fn play(&mut self, solver: &mut Solver, rank: Rank) -> Result<Vec<Play>, Error> {
+        let s = solver.structure(self.st.live());
+        let r = rank.get();
+        let (_, at, _) = solver
+            .declarer_moves(&self.st, &s)
+            .into_iter()
+            .find(|&(_, _, class)| class >> r & 1 != 0)
+            .ok_or(Error::NotPlayable)?;
+        self.st = solver.declarer_play(&self.st, &s, at, r);
+        let mut plays = vec![Play {
+            seat: seat(at),
+            card: Some(rank),
+        }];
+        while !self.is_over() {
+            let s = solver.structure(self.st.live());
+            if Solver::is_declarer_turn(&self.st) {
+                let moves = solver.declarer_moves(&self.st, &s);
+                let [(ch, at, class)] = moves[..] else { break };
+                self.st = ch;
+                plays.push(Play {
+                    seat: seat(at),
+                    card: Rank::try_new(lowest(class)).ok(),
+                });
+            } else {
+                plays.push(self.defend(solver, &s));
+            }
+        }
+        Ok(plays)
+    }
+
+    /// The defender to play picks, among the cards they hold, the one after
+    /// which declarer's goal fares worst on the actual layout, breaking ties
+    /// by declarer's best score over every layout still consistent — the
+    /// most deceptive card.
+    // ponytail: that tie-break is a heuristic; a mixed (randomized) defence
+    // is the game-theoretic answer if a falsecard is ever found to be
+    // predictable from it.
+    fn defend(&mut self, solver: &mut Solver, s: &Structure) -> Play {
+        let st = self.st;
+        let at = (st.leader + st.played) % 4;
+        let d = usize::from(at / 2);
+        let hand = self.hands[d];
+        let c = Solver::consistent(&st, s);
+        let mut best = None;
+        for (class, _, ch, won) in solver.defender_moves(&st, s, c) {
+            let legal = match class {
+                Some(k) => hand & s.classes[k].ranks != 0,
+                None => hand == 0,
+            };
+            if !legal {
+                continue;
+            }
+            let won = self.won + u8::from(won);
+            let cs = solver.structure(ch.live());
+            let layout: usize = cs
+                .classes
+                .iter()
+                .map(|c| c.stride * (self.west & c.ranks).count_ones() as usize)
+                .sum();
+            let dd = solver
+                .feasible(ch)
+                .iter()
+                .map(|v| v.get(layout))
+                .max()
+                .unwrap_or(0)
+                + won;
+            let outcome = match self.goal {
+                Goal::Tricks { target } => u8::from(dd >= target),
+                Goal::Expected => dd,
+            };
+            let key = (outcome, solver.value(ch, self.goal, won).0);
+            if best.is_none_or(|(k, _, _, _)| key < k) {
+                best = Some((key, class, ch, won));
+            }
+        }
+        let (_, class, ch, won) = best.expect("a defender can always follow or show out");
+        let card = class.map(|k| lowest(hand & s.classes[k].ranks));
+        if let Some(r) = card {
+            self.hands[d] &= !(1 << r);
+        }
+        self.st = ch;
+        self.won = won;
+        Play {
+            seat: seat(at),
+            card: card.map(Rank::new),
         }
     }
 }
@@ -858,6 +1063,36 @@ mod tests {
         let w = |west: u64| binom(20, 13 - west);
         let expected = 20 * w(3) + 15 * w(4) + 5 * w(2) + 6 * w(5) + w(1) + w(6);
         assert_eq!(tricks("AJ52", "K76", 3), expected);
+    }
+
+    #[test]
+    fn plays_out_against_the_layout() {
+        let h = |s: &str| s.parse::<Holding>().unwrap();
+        let goal = Goal::Tricks { target: 5 };
+        for (west, want) in [("J98", 5), ("JT98", 4), ("JT9876", 3)] {
+            let mut solver = Solver::new(h("AKQ32"), h("54")).unwrap();
+            let mut game = Game::new(&solver, h(west), goal).unwrap();
+            assert_eq!(game.moves(&mut solver), solver.analyze(goal).unwrap().leads);
+            for rank in ['A', 'K', 'Q', '3', '2'] {
+                if game.is_over() {
+                    break;
+                }
+                let weight = game.weight(&mut solver);
+                assert!(game.moves(&mut solver).iter().all(|l| l.score <= weight));
+                let plays = game
+                    .play(&mut solver, rank.to_string().parse().unwrap())
+                    .unwrap();
+                assert_eq!(plays[0].seat, Seat::North);
+                assert!(plays.len() >= 4, "{plays:?}");
+            }
+            assert!(game.is_over());
+            assert_eq!(game.tricks_won(), want, "West {west}");
+        }
+        let solver = Solver::new(h("AKQ32"), h("54")).unwrap();
+        assert_eq!(
+            Game::new(&solver, h("A"), goal).unwrap_err(),
+            Error::BadWest
+        );
     }
 
     #[test]
