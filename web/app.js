@@ -1,20 +1,73 @@
-// Thin UI over the wasm solver: one `Trainer` per combination returns every
-// goal's optimal line; JS picks an interesting goal, deals the defenders'
-// cards, and plays the suit out, grading each card declarer chooses.
-import init, { Trainer } from './pkg/suit_combination_web.js';
+// Thin UI over the wasm solver, which runs in a worker (worker.js): one
+// `Trainer` per combination returns every goal's optimal line; JS picks an
+// interesting goal, deals the defenders' cards, and plays the suit out,
+// grading each card declarer chooses.
 
 const TOTAL = 10400600; // C(26, 13), the denominator of every root score
 const RANKS = '23456789TJQKA'; // index + 2 = rank value used in the JSON
 const SUITS = [['♠', 's-s'], ['♥', 's-h'], ['♦', 's-d'], ['♣', 's-c']];
 const id = (x) => document.getElementById(x);
 
-// { trainer, north, south, suit, analysis, all, snap, plays, log, lead, done }
+// { north, south, suit, analysis, all, snap, plays, log, lead, done, busy }
 let problem = null;
 
+// --- solver worker ----------------------------------------------------------
+
+// Each call is a message with an id; the reply carries the same id.  A search
+// cannot be interrupted, so a timeout or cancel terminates the worker and
+// spawns a fresh one, failing every call in flight.
+const RANDOM_BUDGET = 2000; // ms a random combination may take before we deal another
+let worker;
+let nextId = 0;
+const pending = new Map(); // id -> { resolve, reject, timer }
+
+function spawn() {
+  worker = new Worker('./worker.js', { type: 'module' });
+  worker.onmessage = ({ data }) => {
+    const p = pending.get(data.id);
+    if (!p) return;
+    pending.delete(data.id);
+    clearTimeout(p.timer);
+    if (data.error === undefined) p.resolve(data.result);
+    else p.reject(new Error(data.fatal ? `solver crashed, probably out of memory (${data.error})` : data.error));
+    if (data.fatal) abort(data.error);
+  };
+  worker.onerror = (e) => abort(e.message || 'solver crashed');
+}
+
+function abort(reason) {
+  worker.terminate();
+  for (const p of pending.values()) {
+    clearTimeout(p.timer);
+    p.reject(new Error(reason));
+  }
+  pending.clear();
+  spawn();
+}
+
+function call(op, args, ms) {
+  return new Promise((resolve, reject) => {
+    const n = nextId++;
+    const timer = ms && setTimeout(() => abort(`gave up after ${ms / 1000} s`), ms);
+    pending.set(n, { resolve, reject, timer });
+    worker.postMessage({ id: n, op, args });
+  });
+}
+
+// Solves a combination (every goal); only one search runs at a time.
+function solve(north, south, ms) {
+  if (pending.size) abort('superseded');
+  id('cancel').classList.remove('hidden');
+  return call('solve', [north, south], ms)
+    .then((json) => JSON.parse(json))
+    .finally(() => id('cancel').classList.add('hidden'));
+}
+
 async function main() {
-  await init();
+  spawn();
   id('new').onclick = newProblem;
   id('solve').onclick = customProblem;
+  id('cancel').onclick = () => abort('cancelled');
   for (const el of ['c-north', 'c-south', 'c-goal']) {
     id(el).onkeydown = (ev) => { if (ev.key === 'Enter') customProblem(); };
   }
@@ -49,22 +102,29 @@ function interesting(a) {
   return best - worst >= 0.05; // expected tricks at stake
 }
 
-function newProblem() {
+async function newProblem() {
   const lengths = id('length').value.split(',').map(Number);
   const kind = id('goalkind').value;
-  for (let attempt = 0; attempt < 200; attempt++) {
-    const [north, south] = randomHoldings(lengths[Math.floor(Math.random() * lengths.length)]);
-    const trainer = new Trainer(north, south);
-    const all = JSON.parse(trainer.analyze());
-    const goals = all.filter((a) => (kind === 'any' || a.goal.kind === kind) && interesting(a));
-    if (goals.length === 0) {
-      trainer.free();
-      continue;
+  info('Dealing…');
+  try {
+    for (let attempt = 0; attempt < 200; attempt++) {
+      const [north, south] = randomHoldings(lengths[Math.floor(Math.random() * lengths.length)]);
+      let all;
+      try {
+        all = await solve(north, south, RANDOM_BUDGET);
+      } catch (e) {
+        if (String(e.message).startsWith('gave up')) continue; // too hard to wait for: deal another
+        throw e;
+      }
+      const goals = all.filter((a) => (kind === 'any' || a.goal.kind === kind) && interesting(a));
+      if (goals.length === 0) continue;
+      await setProblem(north, south, all, goals[Math.floor(Math.random() * goals.length)]);
+      return;
     }
-    setProblem(trainer, north, south, all, goals[Math.floor(Math.random() * goals.length)]);
-    return;
+    info('Could not find an interesting problem with these settings.', true);
+  } catch (e) {
+    if (e.message !== 'superseded') info(String(e.message), true); // a newer request took over
   }
-  info('Could not find an interesting problem with these settings.', true);
 }
 
 // Accepts "aj52", "A J 10 2", "AJT2"; returns ranks in descending order.
@@ -74,41 +134,37 @@ function normalize(text) {
   return fmt([...seen].map((c) => RANKS.indexOf(c) + 2));
 }
 
-function customProblem() {
+async function customProblem() {
   const north = normalize(id('c-north').value);
   const south = normalize(id('c-south').value);
   const goalText = id('c-goal').value.trim().toLowerCase();
-  let trainer;
+  info('Solving… (some combinations take a while)');
   let all;
   try {
-    trainer = new Trainer(north, south);
-    all = JSON.parse(trainer.analyze());
+    all = await solve(north, south);
   } catch (e) {
-    trainer?.free();
-    info(String(e), true);
+    if (e.message !== 'superseded') info(String(e.message), e.message !== 'cancelled');
     return;
   }
   let analysis;
   if (goalText === '' || goalText.startsWith('e')) analysis = all.find((a) => a.goal.kind === 'expected');
   else analysis = all.find((a) => a.goal.kind === 'tricks' && a.goal.target === Number(goalText));
   if (!analysis) {
-    trainer.free();
     info(`No such goal: ${goalText}`, true);
     return;
   }
-  setProblem(trainer, north, south, all, analysis);
+  await setProblem(north, south, all, analysis);
 }
 
-function setProblem(trainer, north, south, all, analysis) {
-  problem?.trainer.free();
+async function setProblem(north, south, all, analysis) {
   // West's cards in the suit are those among a random 13 of the 26 unseen
   // cards, so every split comes up with its vacant-places odds.
   const missing = [...RANKS].filter((c) => !north.includes(c) && !south.includes(c)).map((c) => RANKS.indexOf(c) + 2);
   const west = fmt(shuffle([...missing, ...Array(26 - missing.length).fill(0)]).slice(0, 13).filter(Boolean));
   const target = analysis.goal.kind === 'tricks' ? analysis.goal.target : undefined;
-  const snap = JSON.parse(trainer.start(west, target));
+  const snap = JSON.parse(await call('start', [west, target]));
   const suit = SUITS[Math.floor(Math.random() * SUITS.length)];
-  problem = { trainer, north, south, suit, analysis, all, snap, plays: [...snap.plays], log: [], lead: null, done: false };
+  problem = { north, south, suit, analysis, all, snap, plays: [...snap.plays], log: [], lead: null, done: false, busy: false };
   info('');
   render();
   id('feedback').classList.add('hidden');
@@ -222,8 +278,10 @@ function render() {
 
 // --- play -------------------------------------------------------------------
 
-function play(rank) {
-  const { trainer, snap, analysis, plays, log } = problem;
+async function play(rank) {
+  if (problem.busy) return;
+  problem.busy = true;
+  const { snap, analysis, plays, log } = problem;
   const goal = analysis.goal;
   const chosen = snap.moves.find((m) => m.cards.includes(rank));
   const best = Math.max(...snap.moves.map((m) => m.score));
@@ -238,7 +296,16 @@ function play(rank) {
     text: `Trick ${Math.floor(plays.length / 4) + 1}, ${chosen.seat} ${cardText(rank)}: ${value(goal, chosen.score, snap.weight)}`
       + (ok ? '' : `; best ${value(goal, best, snap.weight)} with ${alternatives}`),
   });
-  const next = JSON.parse(trainer.play(rank));
+  // Every state was memoized by the analysis, so this is quick.
+  let next;
+  try {
+    next = JSON.parse(await call('play', [rank]));
+  } catch (e) {
+    info(String(e.message), true);
+    return;
+  } finally {
+    problem.busy = false;
+  }
   plays.push(...next.plays);
   problem.snap = next;
   render();

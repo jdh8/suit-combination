@@ -61,5 +61,8 @@ Deployed to GitHub Pages by [`.github/workflows/pages.yml`](.github/workflows/pa
 
 Random 7–9 card problems solve in a few milliseconds.  The Pareto search is
 exponential in the worst case: a combination with many separately-ranked
-spot cards (`A862` opposite `J94`) takes a few seconds for the expected-tricks
-goal, during which the page is unresponsive.
+spot cards (`A862` opposite `J94`) takes about a second, and the worst
+(`A953` opposite `KJ8`, `KQ85` opposite `T73`) minutes.  The web trainer
+runs the solver in a worker, so the page stays responsive; a random deal is
+abandoned after two seconds and another dealt, and a combination you enter
+yourself runs until it finishes or you cancel it.

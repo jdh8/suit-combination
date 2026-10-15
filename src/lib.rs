@@ -221,6 +221,18 @@ impl Tricks {
             .all(|(&v, &r)| ((v | Self::H) - r) & Self::H == Self::H)
     }
 
+    /// Lane-wise `min(self, o)` on the lanes of `mask`, `self` elsewhere
+    fn min_on(&self, o: &Self, mask: &Self, words: usize) -> Self {
+        let mut z = *self;
+        for k in 0..words {
+            let (a, b) = (self.0[k], o.0[k]);
+            let ge = (((a | Self::H) - b) & Self::H) >> 7; // 1 in lanes with a >= b
+            let m = (ge * 0xFF) & mask.0[k];
+            z.0[k] = (a & !m) | (b & m);
+        }
+        z
+    }
+
     fn sum(&self, len: usize) -> u32 {
         self.0[..len.div_ceil(8)]
             .iter()
@@ -232,13 +244,35 @@ impl Tricks {
 
 /// Drop duplicates and every vector dominated by another; what remains is a
 /// Pareto antichain
-fn maximal(mut vs: Vec<Tricks>, len: usize) -> Vec<Tricks> {
-    vs.sort_unstable_by_key(|v| (std::cmp::Reverse(v.sum(len)), *v));
-    vs.dedup();
+fn maximal(vs: Vec<Tricks>, len: usize) -> Vec<Tricks> {
+    let words = len.div_ceil(8);
+    // Sort an index by sum (descending, then lexicographic for a stable
+    // choice of line), not the vectors themselves, and dedup by hashing: a
+    // vector can only be dominated by one of larger or equal sum, so the
+    // scan below needs only what came before.
+    let mut seen: std::collections::HashSet<&[u64]> =
+        std::collections::HashSet::with_capacity(vs.len());
+    let mut order: Vec<(u32, u32)> = vs
+        .iter()
+        .enumerate()
+        .filter(|(_, v)| seen.insert(&v.0[..words]))
+        .map(|(i, v)| (v.sum(len), i as u32))
+        .collect();
+    order.sort_unstable_by(|a, b| {
+        b.0.cmp(&a.0)
+            .then_with(|| vs[a.1 as usize].0[..words].cmp(&vs[b.1 as usize].0[..words]))
+    });
     let mut out: Vec<Tricks> = Vec::new();
-    for v in vs {
-        if !out.iter().any(|o| o.covers(&v, len)) {
-            out.push(v);
+    // The vector that dominated the last candidate usually dominates the next.
+    let mut last = 0;
+    for &(_, i) in &order {
+        let v = &vs[i as usize];
+        if out.get(last).is_some_and(|o| o.covers(v, len)) {
+            continue;
+        }
+        match out.iter().position(|o| o.covers(v, len)) {
+            Some(j) => last = j,
+            None => out.push(*v),
         }
     }
     out
@@ -738,15 +772,18 @@ impl Solver {
                         .collect(),
                     s.len,
                 );
-                let mut next = Vec::with_capacity(acc.len() * sub.len());
+                let mut mask = Tricks::ZERO;
+                for i in g.iter() {
+                    mask.set(i, 0xFF);
+                }
+                let words = s.len.div_ceil(8);
+                let mut next = Vec::new();
                 for x in &acc {
-                    for y in &sub {
-                        let mut z = *x;
-                        for i in g.iter() {
-                            z.set(i, z.get(i).min(y.get(i)));
-                        }
-                        next.push(z);
-                    }
+                    // ponytail: pre-reduce each row; the final filter sees far fewer
+                    next.extend(maximal(
+                        sub.iter().map(|y| x.min_on(y, &mask, words)).collect(),
+                        s.len,
+                    ));
                 }
                 acc = maximal(next, s.len);
             }
