@@ -1,5 +1,8 @@
 # suit-combination
 
+See the [calculator comparison](docs/suit-calculator-research.md) and
+[plan to match the leading tools](docs/parity-plan.md) for the researched roadmap.
+
 Single-dummy suit-combination solver for contract bridge, plus a browser
 trainer built on it.  Given North's and South's cards in one suit, it finds
 the line of play that is best for a goal — at least *N* tricks, or the most
