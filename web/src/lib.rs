@@ -10,6 +10,7 @@ use wasm_bindgen::prelude::{JsValue, wasm_bindgen};
 pub struct Trainer {
     solver: Solver,
     game: Option<Game>,
+    max_tricks: u8,
 }
 
 // A JsValue error (rather than a String) keeps wasm-bindgen's externref
@@ -28,14 +29,25 @@ impl Trainer {
         Ok(Self {
             solver: Solver::new(north, south).map_err(err)?,
             game: None,
+            max_tricks: north.len().max(south.len()) as u8,
         })
     }
 
-    /// Every target and expected tricks: a JSON array of
-    /// `suit_combination::Analysis`
-    pub fn analyze(&mut self) -> Result<String, JsValue> {
-        let all = self.solver.analyze_all().map_err(err)?;
+    /// Every target from one trick up to the longer hand's length: a JSON
+    /// array of `suit_combination::Analysis`.  Separate from [`Self::expected`]
+    /// because expected tricks keep full vectors and can take far longer.
+    pub fn targets(&mut self) -> Result<String, JsValue> {
+        let all = (1..=self.max_tricks)
+            .map(|target| self.solver.analyze(Goal::Tricks { target }))
+            .collect::<Result<Vec<_>, _>>()
+            .map_err(err)?;
         serde_json::to_string(&all).map_err(err)
+    }
+
+    /// The `suit_combination::Analysis` of expected tricks as JSON
+    pub fn expected(&mut self) -> Result<String, JsValue> {
+        let a = self.solver.analyze(Goal::Expected).map_err(err)?;
+        serde_json::to_string(&a).map_err(err)
     }
 
     /// Deal `west` the given cards (East gets the rest) and start playing

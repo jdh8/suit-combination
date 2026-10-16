@@ -54,13 +54,26 @@ function call(op, args, ms) {
   });
 }
 
-// Solves a combination (every goal); only one search runs at a time.
-function solve(north, south, ms) {
+// Solves a combination: every target, then expected tricks if `ev`, each
+// within `ms` (no limit when undefined).  Expected tricks keep full vectors
+// and can take a minute where every target takes a second, so running out of
+// time there only drops that goal; the worker restarts, so the targets are
+// solved again for play.  Only one search runs at a time.
+async function solve(north, south, ms, ev = true) {
   if (pending.size) abort('superseded');
   id('cancel').classList.remove('hidden');
-  return call('solve', [north, south], ms)
-    .then((json) => JSON.parse(json))
-    .finally(() => id('cancel').classList.add('hidden'));
+  try {
+    const all = JSON.parse(await call('solve', [north, south], ms));
+    try {
+      if (ev) all.push(JSON.parse(await call('expected', [], ms)));
+    } catch (e) {
+      if (!e.message.startsWith('gave up')) throw e;
+      await call('solve', [north, south]);
+    }
+    return all;
+  } finally {
+    id('cancel').classList.add('hidden');
+  }
 }
 
 async function main() {
@@ -139,15 +152,16 @@ async function customProblem() {
   const south = normalize(id('c-south').value);
   const goalText = id('c-goal').value.trim().toLowerCase();
   info('Solving… (some combinations take a while)');
+  const wantEV = goalText === '' || goalText.startsWith('e');
   let all;
   try {
-    all = await solve(north, south);
+    all = await solve(north, south, undefined, wantEV);
   } catch (e) {
     if (e.message !== 'superseded') info(String(e.message), e.message !== 'cancelled');
     return;
   }
   let analysis;
-  if (goalText === '' || goalText.startsWith('e')) analysis = all.find((a) => a.goal.kind === 'expected');
+  if (wantEV) analysis = all.find((a) => a.goal.kind === 'expected');
   else analysis = all.find((a) => a.goal.kind === 'tricks' && a.goal.target === Number(goalText));
   if (!analysis) {
     info(`No such goal: ${goalText}`, true);

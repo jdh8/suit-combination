@@ -14,7 +14,7 @@ onmessage = async ({ data: { id, op, args } }) => {
       trainer?.free();
       trainer = null;
       trainer = new Trainer(...args);
-      result = trainer.analyze();
+      result = trainer.targets();
     } else if (trainer) {
       result = trainer[op](...args);
     } else {
