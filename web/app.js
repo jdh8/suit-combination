@@ -17,6 +17,7 @@ let problem = null;
 // cannot be interrupted, so a timeout or cancel terminates the worker and
 // spawns a fresh one, failing every call in flight.
 const RANDOM_BUDGET = 2000; // ms a random combination may take before we deal another
+const EXACT_BUDGET = 10000; // ms the exact expected-tricks search gets on a combination you enter
 let worker;
 let nextId = 0;
 const pending = new Map(); // id -> { resolve, reject, timer }
@@ -55,20 +56,29 @@ function call(op, args, ms) {
 }
 
 // Solves a combination: every target, then expected tricks if `ev`, each
-// within `ms` (no limit when undefined).  Expected tricks keep full vectors
-// and can take a minute where every target takes a second, so running out of
-// time there only drops that goal; the worker restarts, so the targets are
-// solved again for play.  Only one search runs at a time.
+// within `ms` (no limit when undefined).  Expected tricks first come from the
+// targets' lines, which is quick; when the bound does not prove that line
+// best, the exact search, which can take minutes, gets `ms` or EXACT_BUDGET.
+// Running out of time or cancelling there keeps the line; the worker
+// restarts, so the targets and the line are solved again for play.  Only one
+// search runs at a time.
 async function solve(north, south, ms, ev = true) {
   if (pending.size) abort('superseded');
   id('cancel').classList.remove('hidden');
   try {
     const all = JSON.parse(await call('solve', [north, south], ms));
+    if (!ev) return all;
+    const line = JSON.parse(await call('expected', [false], ms));
+    if (line.score === line.bound) {
+      all.push(line);
+      return all;
+    }
     try {
-      if (ev) all.push(JSON.parse(await call('expected', [], ms)));
+      all.push(JSON.parse(await call('expected', [true], ms ?? EXACT_BUDGET)));
     } catch (e) {
-      if (!e.message.startsWith('gave up')) throw e;
+      if (!e.message.startsWith('gave up') && e.message !== 'cancelled') throw e;
       await call('solve', [north, south]);
+      all.push(JSON.parse(await call('expected', [false])));
     }
     return all;
   } finally {
@@ -129,7 +139,7 @@ async function newProblem() {
         if (String(e.message).startsWith('gave up')) continue; // too hard to wait for: deal another
         throw e;
       }
-      const goals = all.filter((a) => (kind === 'any' || a.goal.kind === kind) && interesting(a));
+      const goals = all.filter((a) => (kind === 'any' || (a.goal.kind === 'tricks') === (kind === 'tricks')) && interesting(a));
       if (goals.length === 0) continue;
       await setProblem(north, south, all, goals[Math.floor(Math.random() * goals.length)]);
       return;
@@ -161,7 +171,7 @@ async function customProblem() {
     return;
   }
   let analysis;
-  if (wantEV) analysis = all.find((a) => a.goal.kind === 'expected');
+  if (wantEV) analysis = all.find((a) => a.goal.kind !== 'tricks');
   else analysis = all.find((a) => a.goal.kind === 'tricks' && a.goal.target === Number(goalText));
   if (!analysis) {
     info(`No such goal: ${goalText}`, true);
@@ -176,7 +186,7 @@ async function setProblem(north, south, all, analysis) {
   const missing = [...RANKS].filter((c) => !north.includes(c) && !south.includes(c)).map((c) => RANKS.indexOf(c) + 2);
   const west = fmt(shuffle([...missing, ...Array(26 - missing.length).fill(0)]).slice(0, 13).filter(Boolean));
   const target = analysis.goal.kind === 'tricks' ? analysis.goal.target : undefined;
-  const snap = JSON.parse(await call('start', [west, target]));
+  const snap = JSON.parse(await call('start', [west, target, analysis.goal.kind === 'exact_expected']));
   const suit = SUITS[Math.floor(Math.random() * SUITS.length)];
   problem = { north, south, suit, analysis, all, snap, plays: [...snap.plays], log: [], lead: null, done: false, busy: false };
   info('');
@@ -352,14 +362,19 @@ function finish() {
     .map((l) => `<tr class="${l.score === best ? 'best' : ''} ${lead && l.seat === lead.seat && l.cards === lead.cards ? 'chosen' : ''}">
       <td>${l.seat}: ${cardsText(l.cards)}</td><td class="num">${value(goal, l.score, TOTAL)}</td></tr>`)
     .join('');
-  const goals = all.map((a) => `<span class="${a === analysis ? 'active' : ''}">${a.goal.kind === 'tricks' ? `≥${a.goal.target}: ` : 'EV: '}${value(a.goal, a.score, TOTAL)}</span>`).join('');
+  const goals = all.map((a) => `<span class="${a === analysis ? 'active' : ''}">${a.goal.kind === 'tricks' ? `≥${a.goal.target}: ` : 'EV: '}${value(a.goal, a.score, TOTAL)}${a.bound > a.score ? ` (best ≤ ${(a.bound / TOTAL).toFixed(2)})` : ''}</span>`).join('');
+  // The expected-tricks line when neither its bound nor the exact search
+  // (out of time) showed it is the best
+  const unproven = analysis.bound > analysis.score
+    ? `<p class="note">Best line found; the best possible is at most ${value(goal, analysis.bound, TOTAL)}, so a line here may be graded best that is not.</p>`
+    : '';
   const fb = id('feedback');
   fb.classList.remove('hidden');
   fb.innerHTML = `
     <p class="verdict ${ok ? 'ok' : 'no'}">${verdict}${played}</p>
     <div class="panel-title">Every lead</div>
     <table class="leads">${rows}</table>
-    <div class="panel-title">Optimal line</div>
+    <div class="panel-title">Optimal line</div>${unproven}
     <div class="plan"><ul>${planItems(analysis.plan, goal)}</ul></div>
     <div class="panel-title">This combination</div>
     <div class="goals">${goals}</div>

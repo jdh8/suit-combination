@@ -34,8 +34,7 @@ impl Trainer {
     }
 
     /// Every target from one trick up to the longer hand's length: a JSON
-    /// array of `suit_combination::Analysis`.  Separate from [`Self::expected`]
-    /// because expected tricks keep full vectors and can take far longer.
+    /// array of `suit_combination::Analysis`
     pub fn targets(&mut self) -> Result<String, JsValue> {
         let all = (1..=self.max_tricks)
             .map(|target| self.solver.analyze(Goal::Tricks { target }))
@@ -44,19 +43,35 @@ impl Trainer {
         serde_json::to_string(&all).map_err(err)
     }
 
-    /// The `suit_combination::Analysis` of expected tricks as JSON
-    pub fn expected(&mut self) -> Result<String, JsValue> {
-        let a = self.solver.analyze(Goal::Expected).map_err(err)?;
+    /// The `suit_combination::Analysis` of expected tricks as JSON: from the
+    /// targets' lines (fast, with a bound), or `exact`ly, which keeps full
+    /// vectors and can take minutes
+    pub fn expected(&mut self, exact: bool) -> Result<String, JsValue> {
+        let goal = if exact {
+            Goal::ExactExpected
+        } else {
+            Goal::Expected
+        };
+        let a = self.solver.analyze(goal).map_err(err)?;
         serde_json::to_string(&a).map_err(err)
     }
 
     /// Deal `west` the given cards (East gets the rest) and start playing
-    /// for `target` tricks, or for expected tricks when `target` is absent.
-    /// Returns the opening snapshot.
-    pub fn start(&mut self, west: &str, target: Option<u8>) -> Result<String, JsValue> {
+    /// for `target` tricks, or for expected tricks (`exact`ly or not) when
+    /// `target` is absent.  Returns the opening snapshot.
+    pub fn start(
+        &mut self,
+        west: &str,
+        target: Option<u8>,
+        exact: bool,
+    ) -> Result<String, JsValue> {
         let west: Holding = west.parse().map_err(|e| err(format!("West: {e}")))?;
-        let goal = target.map_or(Goal::Expected, |target| Goal::Tricks { target });
-        self.game = Some(Game::new(&self.solver, west, goal).map_err(err)?);
+        let goal = match target {
+            Some(target) => Goal::Tricks { target },
+            None if exact => Goal::ExactExpected,
+            None => Goal::Expected,
+        };
+        self.game = Some(Game::new(&mut self.solver, west, goal).map_err(err)?);
         self.snapshot(vec![])
     }
 

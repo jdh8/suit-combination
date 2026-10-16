@@ -134,6 +134,7 @@ button.secondary:hover { background: rgba(255, 255, 255, 0.12); }
 .verdict { font-weight: 700; font-size: 1.1rem; margin: 0; }
 .verdict.ok { color: var(--club); }
 .verdict.no { color: var(--heart); }
+.note { font-size: 0.85rem; opacity: 0.75; margin: 0.2rem 0 0.4rem; }
 table.leads { border-collapse: collapse; }
 table.leads td { padding: 0.1rem 0.7rem 0.1rem 0; }
 table.leads tr.best td { font-weight: 700; }
