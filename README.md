@@ -60,9 +60,12 @@ Deployed to GitHub Pages by [`.github/workflows/pages.yml`](.github/workflows/pa
 ## Limits
 
 Random 7–9 card problems solve in a few milliseconds.  The Pareto search is
-exponential in the worst case: a combination with many separately-ranked
-spot cards (`A862` opposite `J94`) takes about a second, and the worst
-(`A953` opposite `KJ8`, `KQ85` opposite `T73`) minutes.  The web trainer
+exponential in the worst case.  For a trick target the vectors are collapsed
+to 0/1 ("at least that many more tricks on this layout"), which keeps the
+antichains small: the hardest known combinations (`A953` opposite `KJ8`,
+`KJ84` opposite `T63`) take a few seconds per target, and `KQ85` opposite
+`T73` about seven minutes.  The expected-tricks goal needs the full vectors
+and still takes a minute on `A953` opposite `KJ8`.  The web trainer
 runs the solver in a worker, so the page stays responsive; a random deal is
 abandoned after two seconds and another dealt, and a combination you enter
 yourself runs until it finishes or you cancel it.

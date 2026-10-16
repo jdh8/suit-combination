@@ -448,7 +448,10 @@ pub struct Solver {
     missing: u16,
     /// Layout spaces by live declarer cards
     structures: HashMap<u16, Rc<Structure>>,
+    /// Antichains of tricks per layout, for [`Goal::Expected`]
     memo: HashMap<State, Vec<Tricks>>,
+    /// Antichains of 0/1 per layout by tricks still needed, for trick targets
+    memo_t: HashMap<(State, u8), Vec<Tricks>>,
 }
 
 impl Solver {
@@ -466,6 +469,7 @@ impl Solver {
             missing,
             structures: HashMap::new(),
             memo: HashMap::new(),
+            memo_t: HashMap::new(),
         })
     }
 
@@ -512,14 +516,46 @@ impl Solver {
             .sum()
     }
 
+    /// Some continuation from `st` wins at least `req` tricks per layout
+    fn guarantees(&mut self, st: State, req: &Tricks, len: usize, goal: Goal) -> bool {
+        match goal {
+            Goal::Expected => self.feasible(st).iter().any(|v| v.covers(req, len)),
+            // Every nonzero lane of `req` holds the same count on this path
+            Goal::Tricks { .. } => {
+                let need = (0..len).map(|i| req.get(i)).max().unwrap_or(0);
+                let mut req01 = Tricks::ZERO;
+                for i in 0..len {
+                    req01.set(i, u8::from(req.get(i) > 0));
+                }
+                self.feasible_t(st, need)
+                    .iter()
+                    .any(|v| v.covers(&req01, len))
+            }
+        }
+    }
+
     /// Best [`score`](Self::score) some continuation from `st` reaches,
-    /// with the vector that reaches it
+    /// with the vector that reaches it: tricks per layout for
+    /// [`Goal::Expected`], 0/1 per layout for a trick target
     fn value(&mut self, st: State, goal: Goal, won: u8) -> (u64, Tricks) {
         let s = self.structure(st.live());
         let c = Self::consistent(&st, &s);
-        self.feasible(st)
-            .into_iter()
-            .map(|v| (Self::score(&s, c, goal, won, &v), v))
+        let vs = match goal {
+            Goal::Tricks { target } => self.feasible_t(st, target.saturating_sub(won)),
+            Goal::Expected => self.feasible(st),
+        };
+        vs.into_iter()
+            .map(|v| {
+                let score = match goal {
+                    Goal::Tricks { .. } => c
+                        .iter()
+                        .filter(|&i| v.get(i) != 0)
+                        .map(|i| s.weight[i])
+                        .sum(),
+                    Goal::Expected => Self::score(&s, c, goal, won, &v),
+                };
+                (score, v)
+            })
             .max_by_key(|&(x, _)| x)
             .unwrap_or((0, Tricks::ZERO))
     }
@@ -556,13 +592,13 @@ impl Solver {
         // Tricks per layout the line must still win to realize its vector.
         if let Goal::Tricks { target } = goal {
             for i in 0..structure.len {
-                req.set(i, if req.get(i) >= target { target } else { 0 });
+                req.set(i, req.get(i) * target);
             }
         }
         let plan = Plan::Declarer {
             seat: leads[i].seat,
             cards: leads[i].cards,
-            then: Box::new(self.plan(moves[i].0, req)),
+            then: Box::new(self.plan(moves[i].0, req, goal)),
         };
         Ok(Analysis {
             north: self.north,
@@ -795,7 +831,7 @@ impl Solver {
 
     /// A continuation from `st` that wins at least `req` tricks per layout
     /// (requires `req` to be covered by some feasible vector of `st`)
-    fn plan(&mut self, st: State, req: Tricks) -> Plan {
+    fn plan(&mut self, st: State, req: Tricks, goal: Goal) -> Plan {
         let s = self.structure(st.live());
         if (0..s.len).all(|i| req.get(i) == 0) {
             return Plan::Made;
@@ -803,11 +839,11 @@ impl Solver {
         let c = Self::consistent(&st, &s);
         if Self::is_declarer_turn(&st) {
             for (ch, at, cards) in self.declarer_moves(&st, &s) {
-                if self.feasible(ch).iter().any(|v| v.covers(&req, s.len)) {
+                if self.guarantees(ch, &req, s.len, goal) {
                     return Plan::Declarer {
                         seat: seat(at),
                         cards: Holding::from_bits_truncate(cards),
-                        then: Box::new(self.plan(ch, req)),
+                        then: Box::new(self.plan(ch, req, goal)),
                     };
                 }
             }
@@ -825,7 +861,7 @@ impl Solver {
                 sub_req.set(map[i], sub_req.get(map[i]).max(r));
             }
             let sub = if wanted {
-                self.plan(ch, sub_req)
+                self.plan(ch, sub_req, goal)
             } else {
                 Plan::Hopeless
             };
@@ -982,17 +1018,11 @@ impl Game {
                 .iter()
                 .map(|c| c.stride * (self.west & c.ranks).count_ones() as usize)
                 .sum();
-            let dd = solver
-                .feasible(ch)
-                .iter()
-                .map(|v| v.get(layout))
-                .max()
-                .unwrap_or(0)
-                + won;
-            let outcome = match self.goal {
-                Goal::Tricks { target } => u8::from(dd >= target),
-                Goal::Expected => dd,
+            let vs = match self.goal {
+                Goal::Tricks { target } => solver.feasible_t(ch, target.saturating_sub(won)),
+                Goal::Expected => solver.feasible(ch),
             };
+            let outcome = vs.iter().map(|v| v.get(layout)).max().unwrap_or(0);
             let key = (outcome, solver.value(ch, self.goal, won).0);
             if best.is_none_or(|(k, _, _, _)| key < k) {
                 best = Some((key, class, ch, won));
@@ -1044,5 +1074,85 @@ impl Plan {
 impl fmt::Display for Plan {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         self.fmt_indented(f, 0)
+    }
+}
+
+impl Solver {
+    /// 1 on the layouts of `c`
+    fn ones(c: Set) -> Tricks {
+        let mut v = Tricks::ZERO;
+        for i in c.iter() {
+            v.set(i, 1);
+        }
+        v
+    }
+
+    /// Pareto-maximal 0/1 vectors (over the layouts consistent with `st`):
+    /// 1 where some continuation guarantees at least `need` more tricks.
+    /// The same search as [`feasible`](Self::feasible) on vectors collapsed
+    /// to a threshold: min and union commute with it, so the answer is
+    /// exact, and the antichains stay small where the full ones explode.
+    fn feasible_t(&mut self, st: State, need: u8) -> Vec<Tricks> {
+        let s = self.structure(st.live());
+        let c = Self::consistent(&st, &s);
+        if need == 0 {
+            return vec![Self::ones(c)];
+        }
+        let remaining =
+            st.ns[0].count_ones().max(st.ns[1].count_ones()) as u8 + u8::from(st.played > 0);
+        if need > remaining {
+            return vec![Tricks::ZERO];
+        }
+        if let Some(v) = self.memo_t.get(&(st, need)) {
+            return v.clone();
+        }
+        let out = if Self::is_declarer_turn(&st) {
+            let moves = self.declarer_moves(&st, &s);
+            maximal(
+                moves
+                    .into_iter()
+                    .flat_map(|(ch, _, _)| self.feasible_t(ch, need))
+                    .collect(),
+                s.len,
+            )
+        } else {
+            let mut acc = vec![Self::ones(c)];
+            for (_, g, ch, won) in self.defender_moves(&st, &s, c) {
+                let sub_need = need - u8::from(won);
+                if sub_need == 0 {
+                    continue;
+                }
+                let map = s.map_to(&self.structure(ch.live()));
+                let sub = maximal(
+                    self.feasible_t(ch, sub_need)
+                        .iter()
+                        .map(|y| {
+                            let mut p = Tricks::ZERO;
+                            for i in g.iter() {
+                                p.set(i, y.get(map[i]));
+                            }
+                            p
+                        })
+                        .collect(),
+                    s.len,
+                );
+                let mut mask = Tricks::ZERO;
+                for i in g.iter() {
+                    mask.set(i, 0xFF);
+                }
+                let words = s.len.div_ceil(8);
+                let mut next = Vec::new();
+                for x in &acc {
+                    next.extend(maximal(
+                        sub.iter().map(|y| x.min_on(y, &mask, words)).collect(),
+                        s.len,
+                    ));
+                }
+                acc = maximal(next, s.len);
+            }
+            acc
+        };
+        self.memo_t.insert((st, need), out.clone());
+        out
     }
 }
