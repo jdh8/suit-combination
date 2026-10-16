@@ -53,6 +53,19 @@ cargo run --release --example solve -- A943 QT2 ev     # expected tricks
 cargo run --release --example solve -- A943 QT2 exact  # ... by the exact search
 ```
 
+## Evidence
+
+[`tests/fixtures/cases.json`](tests/fixtures/cases.json) holds reference cases
+with their sources; [`tests/fixtures.rs`](tests/fixtures.rs) checks them and
+replays every returned plan on every layout against every legal defence.
+[`examples/bench.rs`](examples/bench.rs) runs the seeded corpus in
+[`tests/fixtures/corpus.txt`](tests/fixtures/corpus.txt), one process per
+goal with a timeout, and reports timings, memory, timeouts and proof rates:
+
+```sh
+cargo run --release --example bench -- run tests/fixtures/corpus.txt 30 > bench.tsv
+```
+
 ## Web trainer
 
 [`web/`](web/) is a wasm front end: it deals a random combination, picks a goal

@@ -1,0 +1,199 @@
+[
+  {
+    "north": "KQT32", "south": "654", "goal": 2, "value": 0.9804, "tolerance": 0.00005,
+    "source": "SuitC User Guide 9, pp. 2-3, https://bridge.esmarkkappel.dk/suitc/SuitC%20User%20Guide_9.pdf",
+    "checked": "2026-10-16", "note": "Published as 98.04 percent, default vacant places"
+  },
+  {
+    "north": "KQT32", "south": "654", "goal": 3, "value": 0.8957, "tolerance": 0.00005,
+    "source": "SuitC User Guide 9, pp. 2-3", "checked": "2026-10-16", "note": "Published as 89.57 percent"
+  },
+  {
+    "north": "KQT32", "south": "654", "goal": 4, "value": 0.5539, "tolerance": 0.00005,
+    "source": "SuitC User Guide 9, pp. 2-3", "checked": "2026-10-16", "note": "Published as 55.39 percent"
+  },
+  {
+    "north": "KQT32", "south": "654", "goal": "expected", "value": 3.43, "tolerance": 0.005,
+    "source": "SuitC User Guide 9, pp. 2-3", "checked": "2026-10-16", "note": "Published as 3.43 tricks"
+  },
+  {
+    "north": "KJ43", "south": "A952", "goal": 3, "score": 10400600, "leads": ["K"], "avoid": ["A"],
+    "source": "Robert S. Todd, My Favorite Card Combination, example 2, https://www.advinbridge.com/this-week-in-bridge/608",
+    "checked": "2026-10-16", "note": "Published as a 100 percent line: K first, then toward the A9"
+  },
+  {
+    "north": "AQ954", "south": "KT32", "goal": 5, "score": 10400600, "leads": ["A", "Q"],
+    "source": "Pavlicek, Card Combinations #1, https://www.rpbridge.net/4a00.htm",
+    "checked": "2026-10-16", "note": "Every layout is picked up: a show-out reveals the finesse"
+  },
+  {
+    "north": "AQ954", "south": "K832", "goal": 5, "score": 9903180, "leads": ["K"], "avoid": ["A", "Q"],
+    "source": "Pavlicek, Card Combinations #2", "checked": "2026-10-16",
+    "note": "Only East J876 defeats it: TOTAL - C(22,13). The K first handles West 4-0"
+  },
+  {
+    "north": "AQT4", "south": "K32", "goal": 4, "leads": ["A", "Q"],
+    "source": "Pavlicek, Card Combinations #3", "checked": "2026-10-16"
+  },
+  {
+    "north": "AQT3", "south": "K2", "goal": 4, "leads": ["K"],
+    "source": "Pavlicek, Card Combinations #4", "checked": "2026-10-16"
+  },
+  {
+    "north": "AJ54", "south": "K32", "goal": 3, "leads": ["K"],
+    "source": "Pavlicek, Card Combinations #5", "checked": "2026-10-16"
+  },
+  {
+    "north": "AKJT5", "south": "432", "goal": 5, "leads": ["A", "K"],
+    "source": "Pavlicek, Card Combinations #6", "checked": "2026-10-16"
+  },
+  {
+    "north": "AKJT5", "south": "32", "goal": 5, "leads": ["2"], "avoid": ["A", "K"],
+    "source": "Pavlicek, Card Combinations #7", "checked": "2026-10-16",
+    "note": "First-round finesse of the J; cashing a top card first prevents a second finesse"
+  },
+  {
+    "north": "AK54", "south": "J932", "goal": 4, "leads": ["A", "K"],
+    "source": "Pavlicek, Card Combinations #8", "checked": "2026-10-16"
+  },
+  {
+    "north": "AJ976", "south": "K5432", "goal": 5, "score": 9256534, "leads": ["K"], "avoid": ["A"],
+    "source": "Pavlicek, Card Combinations #9", "checked": "2026-10-16",
+    "note": "Only East QT8 defeats it: TOTAL - C(23,13); the A first also loses to West QT8"
+  },
+  {
+    "north": "T43", "south": "AKJ82", "goal": 5, "leads": ["A"],
+    "source": "Pavlicek, Card Combinations #10", "checked": "2026-10-16"
+  },
+  {
+    "north": "K94", "south": "AJT32", "goal": 5, "leads": ["K"],
+    "source": "Pavlicek, Card Combinations #11", "checked": "2026-10-16"
+  },
+  {
+    "north": "AQ654", "south": "J32", "goal": 5, "score": 1410864, "leads": ["2"], "avoid": ["J"],
+    "source": "Pavlicek, Card Combinations #12", "checked": "2026-10-16",
+    "note": "West K doubleton, four companions: 4 * C(21,11). The J never wins five"
+  },
+  {
+    "north": "AQJ4", "south": "T32", "goal": 4, "leads": ["2"], "avoid": ["T"],
+    "source": "Pavlicek, Card Combinations #13", "checked": "2026-10-16"
+  },
+  {
+    "north": "AJT3", "south": "Q92", "goal": 4, "leads": ["9"],
+    "source": "Pavlicek, Card Combinations #14", "checked": "2026-10-16",
+    "note": "Pavlicek avoids the Q as weaker technique (it keeps the lead in the wrong hand); with unlimited entries the engine rates the Q and the 9 equal for every goal"
+  },
+  {
+    "north": "AJ983", "south": "Q2", "goal": "expected", "leads": ["Q"],
+    "source": "Pavlicek, Card Combinations #15", "checked": "2026-10-16",
+    "note": "The Q is the most-tricks lead; for four tricks alone the engine prefers the 2 (71.46 vs 70.25 percent)"
+  },
+  {
+    "north": "QJ654", "south": "A32", "goal": 4, "leads": ["A"],
+    "source": "Pavlicek, Card Combinations #16", "checked": "2026-10-16",
+    "note": "The page states the four-trick goal explicitly"
+  },
+  {
+    "north": "AKT94", "south": "32", "goal": 4, "leads": ["2"],
+    "source": "Pavlicek, Card Combinations #17", "checked": "2026-10-16"
+  },
+  {
+    "north": "AKT95", "south": "432", "goal": 4, "leads": ["2"],
+    "source": "Pavlicek, Card Combinations #18", "checked": "2026-10-16",
+    "note": "Restricted choice: finesse the T, then cash the A"
+  },
+  {
+    "north": "AT94", "south": "K32", "goal": 3, "leads": ["K"],
+    "source": "Pavlicek, Card Combinations #19", "checked": "2026-10-16"
+  },
+  {
+    "north": "AJT5", "south": "432", "goal": 2, "leads": ["2"],
+    "source": "Pavlicek, Card Combinations #20", "checked": "2026-10-16"
+  },
+  {
+    "north": "AJT96", "south": "5432", "goal": 4, "leads": ["2"],
+    "source": "Pavlicek, Card Combinations #21", "checked": "2026-10-16"
+  },
+  {
+    "north": "AQT5", "south": "432", "goal": 2, "leads": ["2"],
+    "source": "Pavlicek, Card Combinations #24", "checked": "2026-10-16"
+  },
+  {
+    "north": "AQ965", "south": "432", "goal": 4, "leads": ["2"],
+    "source": "Pavlicek, Card Combinations #25", "checked": "2026-10-16"
+  },
+  {
+    "north": "AQT76", "south": "5432", "goal": 4, "leads": ["2"],
+    "source": "Pavlicek, Card Combinations #26", "checked": "2026-10-16"
+  },
+  {
+    "north": "A54", "south": "QT32", "goal": 2, "leads": ["A"],
+    "source": "Pavlicek, Card Combinations #27", "checked": "2026-10-16"
+  },
+  {
+    "north": "AT98", "south": "Q432", "goal": 3, "leads": ["2"],
+    "source": "Pavlicek, Card Combinations #29", "checked": "2026-10-16"
+  },
+  {
+    "north": "KQ95", "south": "432", "goal": 2, "leads": ["2"],
+    "source": "Pavlicek, Card Combinations #30", "checked": "2026-10-16"
+  },
+  {
+    "north": "9654", "south": "QJ32", "goal": 2, "leads": ["4"],
+    "source": "Pavlicek, Card Combinations #31", "checked": "2026-10-16"
+  },
+  {
+    "north": "QT854", "south": "32", "goal": 3, "leads": ["2"],
+    "source": "Pavlicek, Card Combinations #32", "checked": "2026-10-16"
+  },
+  {
+    "north": "KT96", "south": "5432", "goal": 2, "leads": ["2"],
+    "source": "Pavlicek, Card Combinations #33", "checked": "2026-10-16"
+  },
+  {
+    "north": "Q54", "south": "KT32", "goal": 3, "leads": ["2"],
+    "source": "Pavlicek, Card Combinations #34", "checked": "2026-10-16",
+    "note": "Lead up to the Q (the shorter hand's honor) first: best for three tricks. For two tricks the engine leads low toward the KT instead, 78.26 vs 77.05 percent, one West singleton (C(20,12) deals) more"
+  },
+  {
+    "north": "J43", "south": "Q982", "goal": 2, "leads": ["2"],
+    "source": "Pavlicek, Card Combinations #35", "checked": "2026-10-16"
+  },
+  {
+    "north": "K7", "south": "Q65432", "goal": 4, "leads": ["2"],
+    "source": "Pavlicek, Card Combinations #36", "checked": "2026-10-16"
+  },
+  {
+    "north": "AKQ32", "south": "54", "goal": 5, "score": 3695120,
+    "source": "Hand derivation: 3-3 split, 20 * C(20,10); Pavlicek's suit break table gives 35.53 percent",
+    "checked": "2026-10-16"
+  },
+  {
+    "north": "AKQ32", "south": "54", "goal": 4, "score": 8733920,
+    "source": "Hand derivation: 3-3 or 4-2, 20 * C(20,10) + 30 * C(20,11)", "checked": "2026-10-16"
+  },
+  {
+    "north": "AKQ32", "south": "54", "goal": "expected", "score": 43630840,
+    "source": "Hand derivation: 5 on 3-3, 4 on 4-2, 3 otherwise", "checked": "2026-10-16"
+  },
+  {
+    "north": "AQ3", "south": "42", "goal": 2, "score": 5218864, "leads": ["A"],
+    "source": "Hand derivation: K onside (half) plus East's singleton K, C(18,6); cash the A first",
+    "checked": "2026-10-16"
+  },
+  {
+    "north": "AQ3", "south": "42", "goal": "expected", "score": 15619464,
+    "source": "Hand derivation: two tricks on the layouts above, one otherwise", "checked": "2026-10-16"
+  },
+  {
+    "north": "AJ52", "south": "K76", "goal": 3, "score": 8013630,
+    "source": "Hand derivation: 3-3, West long 4-2, 2-4 with the Q West, 5-1 West long, Q singleton West, 6-0 West",
+    "checked": "2026-10-16"
+  },
+  {
+    "north": "A8", "south": "JT62", "goal": "expected", "value": 1.651, "tolerance": 0.0005,
+    "source": "This project, tests/solver.rs expected_brackets_the_exact_search; exact search, not independent",
+    "checked": "2026-10-16",
+    "note": "Falsecard case: the combined target line gets 1.644, the exact search 1.651"
+  }
+]

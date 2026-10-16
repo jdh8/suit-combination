@@ -41,7 +41,7 @@ targets; double-dummy averages are upper bounds, not policies.
 | Coverage | At most eight missing cards (`TooManyMissing`) | `AQ / 2` is rejected |
 | Interface | Browser trainer, custom holdings, card grading, revealable tree, CLI, serializable Rust API | No analysis-first view, free defender branching, sharing or export |
 | Runtime control | Worker termination; random-deal and exact-EV budgets | No engine budget, retained progress or memory contract |
-| Validation | 11 integration tests, a few published combinations | No reference corpus, differential runner or benchmark; CI only deploys Pages |
+| Validation | 44 reference cases in [tests/fixtures/cases.json](../tests/fixtures/cases.json) (SuitC, Todd, Pavlicek, hand derivations); a policy evaluator ([tests/fixtures.rs](../tests/fixtures.rs)) replays every plan on every layout against every legal defence; a seeded 116-combination corpus run by [examples/bench.rs](../examples/bench.rs); CI runs tests and the corpus | Published numbers exist for few cases (Pavlicek states plays, not percentages); no uncompressed oracle beyond the evaluator; corpus timings from one machine |
 
 `Game::defend` is a heuristic tie-break for the trainer, not a defense proof.
 Guarantees must be checked by following the returned policy against every
@@ -69,6 +69,26 @@ analysis time of one native release run; spot checks, not percentiles.
 The README's 600-case EV study is not reproducible from tracked files (no
 seed, harness or raw results). Competitors were not run or timed here.
 
+### Corpus baseline (2026-10-16)
+
+`examples/bench.rs run tests/fixtures/corpus.txt 30`, same machine, one
+process per run, 861 runs over 116 combinations (every target, `ev`,
+`exact`); raw rows in [bench-2026-10-16.tsv](bench-2026-10-16.tsv).
+
+| Measure | Value |
+| --- | --- |
+| Finished / timeout / error | 854 / 7 / 0 |
+| Time p50 / p95 / max (finished) | 4.1 ms / 114 ms / 13.3 s |
+| Peak memory | 212 MB (`KJ85 / T63` ev) |
+| Memoized states / widest antichain | 237,745 / 57,877 (`AQ95 / T73` exact) |
+| `ev` proven by its bound | 94 / 114 (82.5%) |
+| EV gap, exact minus line (113 pairs) | mean 0.003, max 0.091 (`AQT8 / 642`) |
+| Timeouts (30 s) | `KQ85 / T73` t2, ev, exact; `KT97 / 53` t1, ev, exact; `A953 / KJ8` exact |
+
+New from the stratified sample: `KJT85` opposite a void takes 4–7 s per
+goal, so void hands are not trivially cheap, and the EV line's worst miss is
+larger than the earlier 600-combination study suggested (0.057).
+
 ## Phases
 
 ### 1. Evidence
@@ -89,6 +109,18 @@ seed, harness or raw results). Competitors were not run or timed here.
 
 **Done:** CI runs tests and the corpus; every fixture traceable; zero
 unexplained disagreements in shared scope; benchmark results reproducible.
+
+**Status 2026-10-16:** fixtures, evaluator, corpus and CI exist. The
+evaluator agrees with every claimed score (all goals, 44 reference cases and
+60 seeded random combinations). Three Pavlicek plays disagreed with the
+engine and are explained in the fixture notes: `AJ983 / Q2` (his Q is the
+most-tricks lead, not the four-trick lead), `Q54 / KT32` (his line is best
+for three tricks; for two the engine gains one West singleton by leading
+toward the KT) and `AJT3 / Q92` (his objection to the Q is an entry argument
+outside the model). The uncompressed oracle is not built: the evaluator
+checks guarantees, not optimality, so optimality evidence is still the
+published values and derivations. Corpus results: see
+[bench-2026-10-16.tsv](bench-2026-10-16.tsv) and the summary below.
 
 ### 2. Practical exact analysis, unavoidable proof status
 

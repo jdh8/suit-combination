@@ -1,0 +1,19 @@
+name: CI
+
+on:
+  push:
+    branches: [ "main" ]
+  pull_request:
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+    - uses: actions/checkout@v7
+    - run: cargo test --all-features --release
+    - name: Benchmark corpus
+      run: cargo run --release --example bench -- run tests/fixtures/corpus.txt 10 > bench.tsv
+    - uses: actions/upload-artifact@v4
+      with:
+        name: bench
+        path: bench.tsv

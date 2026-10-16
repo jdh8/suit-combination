@@ -504,6 +504,20 @@ impl Solver {
         })
     }
 
+    /// Diagnostics for benchmarks: memoized states and the largest antichain
+    #[doc(hidden)]
+    pub fn stats(&self) -> (usize, usize) {
+        let states = self.memo.len() + self.memo_t.len() + self.memo_line.len();
+        let widest = self
+            .memo
+            .values()
+            .chain(self.memo_t.values())
+            .map(Vec::len)
+            .max()
+            .unwrap_or(0);
+        (states, widest)
+    }
+
     fn structure(&mut self, live: u16) -> Rc<Structure> {
         Rc::clone(
             self.structures
