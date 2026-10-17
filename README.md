@@ -22,7 +22,7 @@ and comes with a bound, the sum of the targets' success probabilities, that
 no line can beat.  On 600 random combinations the line was the best on 95%,
 proven so by the bound on 81%, and at worst 0.06 tricks short.
 `Goal::ExactExpected` searches the full "tricks per layout" vectors instead,
-which is exact but can take minutes.
+which is exact but can take seconds.
 
 Assumptions, as in Pavlicek's card-combination tables: unlimited entries to
 both hands, no ruffs, no inference about the enemy hands, only tricks in this
@@ -150,13 +150,14 @@ Deployed to GitHub Pages by [`.github/workflows/pages.yml`](.github/workflows/pa
 Random 7–9 card problems solve in a few milliseconds.  The Pareto search is
 exponential in the worst case.  For a trick target the vectors are collapsed
 to 0/1 ("at least that many more tricks on this layout"), which keeps the
-antichains small: hard combinations such as `A953` opposite `KJ8` and
-`KJ84` opposite `T63` take well under a second per target and `KQ85`
-opposite `T73` about ten seconds, but for three tricks the hardest known,
-`KJ9753` opposite a void, does not finish in fifteen minutes.
-`Goal::Expected` adds well under a second to the targets, while
-`Goal::ExactExpected` needs the full vectors and takes about twenty seconds
-on `A953` opposite `KJ8`.  The web trainer runs the solver in a worker, so
+antichains small.  Only the best vector counts in the end, so a narrow
+search first finds a good line, and the exact search then drops every
+vector that already loses more deals than that line.  The hardest
+combinations known, such as `KQ85` opposite `T73` and `KJ9753` opposite a
+void, take under a second per target, and `Goal::Expected` adds a second or
+two at most.  `Goal::ExactExpected` needs the full vectors: about a second
+on those, but about fifteen seconds on `KJ9753` opposite a void.  The web
+trainer runs the solver in a worker, so
 the page stays responsive; a random deal is abandoned after two seconds and
 another dealt, and a combination you enter yourself searches ten seconds at a
 time until it finishes or you stop it.  When a search is interrupted its bound comes from

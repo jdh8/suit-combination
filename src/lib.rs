@@ -14,11 +14,13 @@
 //! of "tricks per layout" vectors some continuation guarantees, so the
 //! recommended line is the true optimum against omniscient defence.
 //!
-//! That holds for every trick target and for [`Goal::ExactExpected`], whose
-//! full vectors can take minutes.  [`Goal::Expected`] instead combines the
-//! targets' optimal lines, which is fast, and brackets the true optimum
-//! between the line found ([`Analysis::score`]) and the sum of the targets'
-//! success probabilities ([`Analysis::bound`]).
+//! That holds for every trick target and for [`Goal::ExactExpected`].  Only
+//! the best vector counts in the end, so the search first finds a good line
+//! cheaply, then keeps only the vectors that might still beat it: one that
+//! already loses more deals than the good line cannot.  [`Goal::Expected`]
+//! instead combines the targets' optimal lines, which is fast, and brackets
+//! the true optimum between the line found ([`Analysis::score`]) and the sum
+//! of the targets' success probabilities ([`Analysis::bound`]).
 //!
 //! A search can be stopped early by [`Solver::set_interrupt`]:
 //! [`Solver::analyze`] then fails with [`Error::Interrupted`], which still
@@ -98,7 +100,7 @@ pub enum Goal {
     /// [`Analysis::bound`] says when it surely is.
     Expected,
     /// The most tricks on average, by the exact search over full "tricks
-    /// per layout" vectors, which can take minutes
+    /// per layout" vectors, which can take seconds
     ExactExpected,
 }
 
@@ -237,6 +239,13 @@ impl std::ops::BitAnd for Set {
     type Output = Self;
     fn bitand(self, o: Self) -> Self {
         Self(std::array::from_fn(|k| self.0[k] & o.0[k]))
+    }
+}
+
+impl std::ops::BitOr for Set {
+    type Output = Self;
+    fn bitor(self, o: Self) -> Self {
+        Self(std::array::from_fn(|k| self.0[k] | o.0[k]))
     }
 }
 
@@ -422,6 +431,25 @@ fn maximal_sets(mut vs: Vec<Set>, len: usize, branch: Option<&Set>) -> Vec<Set> 
 
 const NORTH: u8 = 0;
 const SOUTH: u8 = 2;
+
+/// Vectors kept per merge by [`Cut::Beam`]: 16 to 256 time within 10% of
+/// each other on the hard cases, 1024 up to 4x slower
+const BEAM: usize = 64;
+
+/// What a search may leave out of an antichain
+#[derive(Debug, Clone, Copy)]
+enum Cut {
+    /// Every vector that loses at most this many deals (see
+    /// [`Solver::post`]), and maybe others; `u64::MAX` keeps all
+    Budget(u64),
+    /// The vectors losing least, this many per merge: some lines' vectors
+    /// or less, so the best is a lower bound
+    Beam(usize),
+}
+
+impl Cut {
+    const ALL: Self = Self::Budget(u64::MAX);
+}
 
 fn seat(i: u8) -> Seat {
     [Seat::North, Seat::East, Seat::South, Seat::West][i as usize]
@@ -706,10 +734,15 @@ pub struct Solver {
     missing: u16,
     /// Layout spaces by live declarer cards
     structures: FxMap<u16, Rc<Structure>>,
-    /// Antichains of tricks per layout, for [`Goal::ExactExpected`]
-    memo: FxMap<State, Vec<Tricks>>,
-    /// Antichains of 0/1 per layout by tricks still needed, for trick targets
-    memo_t: FxMap<(State, u8), Vec<Set>>,
+    /// Antichains of tricks per layout, for [`Goal::ExactExpected`], with
+    /// the [`Cut::Budget`] they hold
+    memo: FxMap<State, (u64, Vec<Tricks>)>,
+    /// Antichains of 0/1 per layout by tricks still needed, for trick
+    /// targets, with the [`Cut::Budget`] they hold
+    memo_t: FxMap<(State, u8), (u64, Vec<Set>)>,
+    /// [`Cut::Beam`] answers that left something out
+    beam: FxMap<State, Vec<Tricks>>,
+    beam_t: FxMap<(State, u8), Vec<Set>>,
     /// [`Structure::map_to`] by the live cards of parent and child
     maps: FxMap<(u16, u16), Rc<[usize]>>,
     /// [`Goal::Expected`] lines by state and requirement followed
@@ -759,6 +792,8 @@ impl Solver {
             structures: FxMap::default(),
             memo: FxMap::default(),
             memo_t: FxMap::default(),
+            beam: FxMap::default(),
+            beam_t: FxMap::default(),
             maps: FxMap::default(),
             memo_line: FxMap::default(),
             interrupt: None,
@@ -816,8 +851,8 @@ impl Solver {
         let widest = self
             .memo
             .values()
-            .map(Vec::len)
-            .chain(self.memo_t.values().map(Vec::len))
+            .map(|(_, v)| v.len())
+            .chain(self.memo_t.values().map(|(_, v)| v.len()))
             .max()
             .unwrap_or(0);
         (states, widest)
@@ -880,16 +915,29 @@ impl Solver {
 
     /// Some continuation from `st` wins at least `req` tricks per layout
     fn guarantees(&mut self, st: State, req: &Tricks, len: usize, goal: Goal) -> bool {
+        // A vector covering `req` loses no more than `req` does.
+        let s = self.structure(st.live());
+        let c = Self::consistent(&st, &s);
         match goal {
-            Goal::ExactExpected => self.feasible(st).iter().any(|v| v.covers(req, len)),
+            Goal::ExactExpected => {
+                let budget = match self.memo.get(&st) {
+                    Some(&(u64::MAX, _)) => u64::MAX,
+                    _ => Self::lost(&self.post(&st, &s), c, Self::cap(&st), req),
+                };
+                let (vs, _) = self.feasible(st, Cut::Budget(budget));
+                vs.iter().any(|v| v.covers(req, len))
+            }
             // Every nonzero lane of `req` holds the same count on this path.
             // A Goal::Expected line follows trick targets' vectors.
             Goal::Tricks { .. } | Goal::Expected => {
                 let need = (0..len).map(|i| req.get(i)).max().unwrap_or(0);
                 let req: Set = (0..len).filter(|&i| req.get(i) > 0).collect();
-                self.feasible_t(st, need)
-                    .iter()
-                    .any(|v| v.covers(&req, len))
+                let budget = match self.memo_t.get(&(st, need)) {
+                    Some(&(u64::MAX, _)) => u64::MAX,
+                    _ => Self::deals(&self.post(&st, &s), c - req),
+                };
+                let (vs, _) = self.feasible_t(st, need, Cut::Budget(budget));
+                vs.iter().any(|v| v.covers(&req, len))
             }
         }
     }
@@ -900,19 +948,46 @@ impl Solver {
     fn value(&mut self, st: State, goal: Goal, won: u8) -> (u64, Tricks) {
         let s = self.structure(st.live());
         let c = Self::consistent(&st, &s);
+        // A beam finds some line's score `x` (or the whole antichain).  The
+        // best line scores no less, so it falls short of `all` by at most
+        // `all - x`, which bounds the deals it loses (see `budget`).  The
+        // search keeping every vector within that loss finds it, and what
+        // else it returns scores below `x`.
         match goal {
-            Goal::Tricks { target } => self
-                .feasible_t(st, target.saturating_sub(won))
-                .into_iter()
-                .map(|v| ((c & v).iter().map(|i| s.weight[i]).sum(), v))
-                .max_by_key(|&(x, _)| x)
-                .map_or((0, Tricks::ZERO), |(x, v)| (x, Self::ones(v))),
-            Goal::ExactExpected => self
-                .feasible(st)
-                .into_iter()
-                .map(|v| (Self::score(&s, c, goal, won, &v), v))
-                .max_by_key(|&(x, _)| x)
-                .unwrap_or((0, Tricks::ZERO)),
+            Goal::Tricks { target } => {
+                let need = target.saturating_sub(won);
+                let all: u64 = c.iter().map(|i| s.weight[i]).sum();
+                let top = |vs: Vec<Set>| {
+                    vs.into_iter()
+                        .map(|v| ((c & v).iter().map(|i| s.weight[i]).sum(), v))
+                        .max_by_key(|&(x, _)| x)
+                };
+                let (vs, done) = self.feasible_t(st, need, Cut::Beam(BEAM));
+                let mut best = top(vs);
+                if !done {
+                    let budget = self.budget(&st, &s, all - best.map_or(0, |(x, _)| x));
+                    best = top(self.feasible_t(st, need, Cut::Budget(budget)).0);
+                }
+                best.map_or((0, Tricks::ZERO), |(x, v)| (x, Self::ones(v)))
+            }
+            Goal::ExactExpected => {
+                let all: u64 = c
+                    .iter()
+                    .map(|i| s.weight[i] * u64::from(Self::cap(&st) + won))
+                    .sum();
+                let top = |vs: Vec<Tricks>| {
+                    vs.into_iter()
+                        .map(|v| (Self::score(&s, c, goal, won, &v), v))
+                        .max_by_key(|&(x, _)| x)
+                };
+                let (vs, done) = self.feasible(st, Cut::Beam(BEAM));
+                let mut best = top(vs);
+                if !done {
+                    let budget = self.budget(&st, &s, all - best.map_or(0, |(x, _)| x));
+                    best = top(self.feasible(st, Cut::Budget(budget)).0);
+                }
+                best.unwrap_or((0, Tricks::ZERO))
+            }
             Goal::Expected => {
                 let t = self.line(st, Tricks::ZERO);
                 (Self::score(&s, c, goal, won, &t), t)
@@ -1225,49 +1300,83 @@ impl Solver {
     }
 
     /// Pareto-maximal "tricks per layout" vectors (over the layouts
-    /// consistent with `st`) that some declarer continuation guarantees
-    fn feasible(&mut self, st: State) -> Vec<Tricks> {
-        if let Some(v) = self.memo.get(&st) {
-            return v.clone();
+    /// consistent with `st`) that some declarer continuation guarantees, as
+    /// far as `cut` keeps them, and whether it kept them all
+    fn feasible(&mut self, st: State, cut: Cut) -> (Vec<Tricks>, bool) {
+        match (self.memo.get(&st), cut) {
+            (Some((b, v)), Cut::Budget(budget)) if *b >= budget => {
+                return (v.clone(), *b == u64::MAX);
+            }
+            // A smaller budget may have kept nothing worth a beam.
+            (Some((u64::MAX, v)), Cut::Beam(_)) => return (v.clone(), true),
+            _ => {}
+        }
+        if let Cut::Beam(_) = cut
+            && let Some(v) = self.beam.get(&st)
+        {
+            return (v.clone(), false);
         }
         if self.tick() {
-            return Vec::new();
+            return (Vec::new(), false);
         }
         let s = self.structure(st.live());
         let c = Self::consistent(&st, &s);
+        let cap = Self::cap(&st);
+        let mut w = match cut {
+            Cut::Budget(b) if b != u64::MAX => self.post(&st, &s),
+            _ => Vec::new(),
+        };
+        let budget = match cut {
+            Cut::Budget(b) if b != u64::MAX && b < Self::lost(&w, c, cap, &Tricks::ZERO) => b,
+            _ => u64::MAX,
+        };
+        let cut = match cut {
+            Cut::Budget(_) => Cut::Budget(budget),
+            beam => beam,
+        };
+        let mut kept = true;
         let out = if st.played == 0 && st.ns == [0; 2] {
             vec![Tricks::ZERO]
         } else if Self::is_declarer_turn(&st) {
-            let moves = self.declarer_moves(&st, &s);
-            let vs = moves
-                .into_iter()
-                .flat_map(|(ch, _, _)| self.feasible(ch))
-                .collect();
-            if self.interrupted {
-                return Vec::new();
+            let mut all = Vec::new();
+            for (ch, _, _) in self.declarer_moves(&st, &s) {
+                let (vs, whole) = self.feasible(ch, cut);
+                if self.interrupted {
+                    return (Vec::new(), false);
+                }
+                kept &= whole;
+                all.extend(vs);
             }
-            maximal(vs, s.len, None)
+            let mut out = maximal(all, s.len, None);
+            out.retain(|v| budget == u64::MAX || Self::lost(&w, c, cap, v) <= budget);
+            if matches!(cut, Cut::Beam(k) if out.len() > k) && w.is_empty() {
+                w = self.post(&st, &s);
+            }
+            Self::trim(out, cut, &mut kept, |v| Self::lost(&w, c, cap, v))
         } else {
             // The defender routes each layout to its worst legal branch, so a
             // continuation guarantees per layout the minimum over the
             // branches where that layout may legally play.  A completed trick
             // may coarsen the structure; `map` lifts the child's vectors.
+            // Every vector is at most the minimum over branches of the most
+            // each branch holds, so the merge starts there.
             let mut start = Tricks::ZERO;
             for i in c.iter() {
                 start.set(i, 127);
             }
-            let mut acc = vec![start];
+            let mut subs = Vec::new();
             for (_, g, ch, won) in self.defender_moves(&st, &s, c) {
                 let map = self.map(&st, &ch);
                 let bonus = u8::from(won);
-                let ys = self.feasible(ch);
+                let (vs, whole) = self.feasible(ch, cut);
                 if self.interrupted {
-                    return Vec::new();
+                    return (Vec::new(), false);
                 }
+                kept &= whole;
                 // Only the branch's legal layouts matter, so project onto
                 // them first: that collapses many continuations into one.
                 let sub = maximal(
-                    ys.iter()
+                    vs.iter()
                         .map(|y| {
                             let mut p = Tricks::ZERO;
                             for i in g.iter() {
@@ -1275,32 +1384,158 @@ impl Solver {
                             }
                             p
                         })
+                        .filter(|p| budget == u64::MAX || Self::lost(&w, g, cap, p) <= budget)
                         .collect(),
                     s.len,
                     None,
                 );
+                for i in g.iter() {
+                    let most = sub.iter().map(|p| p.get(i)).max().unwrap_or(0);
+                    start.set(i, start.get(i).min(most));
+                }
+                let most = if budget == u64::MAX {
+                    0
+                } else {
+                    sub.iter().map(|p| Self::held(&w, g, p)).max().unwrap_or(0)
+                };
                 let mut mask = Tricks::ZERO;
                 for i in g.iter() {
                     mask.set(i, 0xFF);
                 }
-                let words = s.len.div_ceil(8);
+                subs.push((g, mask, sub, most));
+            }
+            if budget != u64::MAX {
+                subs.sort_by_key(|(_, _, sub, _)| sub.len());
+            }
+            let words = s.len.div_ceil(8);
+            let mut acc = vec![start];
+            for b in 0..subs.len() {
+                let (_, mask, ref sub, _) = subs[b];
+                // A vector loses at least what it holds in a later branch
+                // beyond the most any vector there holds.
+                let keep = |r: &Tricks| {
+                    budget == u64::MAX
+                        || Self::lost(&w, c, cap, r)
+                            + subs[b + 1..]
+                                .iter()
+                                .map(|&(h, _, _, most)| Self::held(&w, h, r).saturating_sub(most))
+                                .max()
+                                .unwrap_or(0)
+                            <= budget
+                };
                 let mut next = Vec::new();
                 for x in &acc {
                     // ponytail: pre-reduce each row; the final filter sees far fewer
                     next.extend(maximal(
-                        sub.iter().map(|y| x.min_on(y, &mask, words)).collect(),
+                        sub.iter()
+                            .map(|y| x.min_on(y, &mask, words))
+                            .filter(keep)
+                            .collect(),
                         s.len,
                         None,
                     ));
                 }
                 acc = maximal(next, s.len, Some(&mask));
+                if matches!(cut, Cut::Beam(k) if acc.len() > k) && w.is_empty() {
+                    w = self.post(&st, &s);
+                }
+                acc = Self::trim(acc, cut, &mut kept, |v| Self::lost(&w, c, cap, v));
             }
             acc
         };
-        if !self.interrupted {
-            self.memo.insert(st, out.clone());
+        match cut {
+            Cut::Beam(_) if !kept => {
+                self.beam.insert(st, out.clone());
+            }
+            _ => {
+                self.memo.insert(st, (budget, out.clone()));
+            }
         }
-        out
+        (out, kept && budget == u64::MAX)
+    }
+
+    /// `vs` cut to a [`Cut::Beam`]'s width, those losing least first
+    fn trim<V>(mut vs: Vec<V>, cut: Cut, kept: &mut bool, lost: impl Fn(&V) -> u64) -> Vec<V> {
+        if let Cut::Beam(k) = cut
+            && vs.len() > k
+        {
+            vs.sort_by_cached_key(lost);
+            vs.truncate(k);
+            *kept = false;
+        }
+        vs
+    }
+
+    /// Deals consistent with the cards seen, per layout of `st` (0 off the
+    /// consistent ones).  A class of `m` cards of which West showed `sw` and
+    /// East `se` leaves `C(m - sw - se, k - sw)` ways for West to hold `k`:
+    /// the deals in which the very cards shown sit where they were shown.
+    /// A line failing a layout here fails at least these deals at the root,
+    /// however play got here, and a defender's card leaves each layout of
+    /// the child at most the deals of the parent's layouts that become it.
+    /// So a vector losing more deals here than a known line loses at the
+    /// root can be dropped: nothing built on it beats that line.
+    fn post(&self, st: &State, s: &Structure) -> Vec<u64> {
+        let n = u64::from(self.missing.count_ones());
+        let mut w = vec![0; s.len];
+        for i in Self::consistent(st, s).iter() {
+            let mut west = 0;
+            let mut deals = 1;
+            for (k, class) in s.classes.iter().enumerate() {
+                let held = (i / class.stride % (usize::from(class.size) + 1)) as u64;
+                let (sw, se) = (u64::from(st.shown[1][k]), u64::from(st.shown[0][k]));
+                west += held;
+                deals *= binom(u64::from(class.size) - sw - se, held - sw);
+            }
+            w[i] = deals * binom(26 - n, 13 - west);
+        }
+        w
+    }
+
+    /// The most deals of [`post`](Self::post) a vector from `st` can lose
+    /// while losing at most `short` of the score: a layout weighs at least
+    /// its deals, by a ratio that varies, so take the largest
+    fn budget(&self, st: &State, s: &Structure, short: u64) -> u64 {
+        let w = self.post(st, s);
+        Self::consistent(st, s)
+            .iter()
+            .map(|i| {
+                let b = (u128::from(short) * u128::from(w[i])).div_ceil(u128::from(s.weight[i]));
+                u64::try_from(b).expect("deals are at most the weight")
+            })
+            .max()
+            .unwrap_or(0)
+    }
+
+    /// Deals of `w` on the layouts of `c`
+    fn deals(w: &[u64], c: Set) -> u64 {
+        c.iter().map(|i| w[i]).sum()
+    }
+
+    /// Deals of `w` times the tricks `v` falls short of `cap`, over `c`: an
+    /// expected-tricks vector's loss
+    fn lost(w: &[u64], c: Set, cap: u8, v: &Tricks) -> u64 {
+        c.iter()
+            .map(|i| w[i] * u64::from(cap.saturating_sub(v.get(i))))
+            .sum()
+    }
+
+    /// Deals of `w` times the tricks of `v`, over `c`
+    fn held(w: &[u64], c: Set, v: &Tricks) -> u64 {
+        c.iter().map(|i| w[i] * u64::from(v.get(i))).sum()
+    }
+
+    /// Tricks left to play, the current one included: the longer hand plays
+    /// to each
+    fn cap(st: &State) -> u8 {
+        let mut n = st.ns.map(|h| h.count_ones() as u8);
+        for p in 0..usize::from(st.played) {
+            let at = (st.leader + p as u8) % 4;
+            if at.is_multiple_of(2) && st.trick[p] != 0 {
+                n[usize::from(at / 2)] += 1;
+            }
+        }
+        n[0].max(n[1])
     }
 
     /// A continuation from `st` that wins at least `req` tricks per layout
@@ -1537,17 +1772,23 @@ impl Game {
                 .sum();
             let outcome = match self.goal {
                 Goal::Tricks { target } => {
-                    let vs = solver.feasible_t(ch, target.saturating_sub(won));
+                    let (vs, _) = solver.feasible_t(ch, target.saturating_sub(won), Cut::ALL);
                     vs.iter().any(|v| v.contains(layout)).into()
                 }
                 Goal::ExactExpected => {
-                    let vs = solver.feasible(ch);
+                    let (vs, _) = solver.feasible(ch, Cut::ALL);
                     vs.iter().map(|v| v.get(layout)).max().unwrap_or(0)
                 }
                 // The most tricks declarer could be sure of on this layout,
                 // which the 0/1 searches answer exactly
                 Goal::Expected => (1..)
-                    .take_while(|&k| solver.feasible_t(ch, k).iter().any(|v| v.contains(layout)))
+                    .take_while(|&k| {
+                        solver
+                            .feasible_t(ch, k, Cut::ALL)
+                            .0
+                            .iter()
+                            .any(|v| v.contains(layout))
+                    })
                     .count() as u8,
             };
             let key = (outcome, solver.value(ch, self.goal, won).0);
@@ -1626,77 +1867,149 @@ impl Solver {
 
     /// Pareto-maximal 0/1 vectors, as sets of layouts (of those consistent
     /// with `st`) where some continuation guarantees at least `need` more
-    /// tricks.  The same search as [`feasible`](Self::feasible) on vectors
-    /// collapsed to a threshold: min and union commute with it, so the
-    /// answer is exact, and the antichains stay small where the full ones
-    /// explode.
-    fn feasible_t(&mut self, st: State, need: u8) -> Vec<Set> {
+    /// tricks, as far as `cut` keeps them, and whether it kept them all.
+    /// The same search as [`feasible`](Self::feasible) on vectors collapsed
+    /// to a threshold: min and union commute with it, so the answer is
+    /// exact, and the antichains stay small where the full ones explode.
+    fn feasible_t(&mut self, st: State, need: u8, cut: Cut) -> (Vec<Set>, bool) {
         let s = self.structure(st.live());
         let c = Self::consistent(&st, &s);
         if need == 0 {
-            return vec![c];
+            return (vec![c], true);
         }
         let remaining =
             st.ns[0].count_ones().max(st.ns[1].count_ones()) as u8 + u8::from(st.played > 0);
         if need > remaining {
-            return vec![Set::EMPTY];
+            return (vec![Set::EMPTY], true);
         }
-        if let Some(v) = self.memo_t.get(&(st, need)) {
-            return v.clone();
+        match (self.memo_t.get(&(st, need)), cut) {
+            (Some((b, v)), Cut::Budget(budget)) if *b >= budget => {
+                return (v.clone(), *b == u64::MAX);
+            }
+            // A smaller budget may have kept nothing worth a beam.
+            (Some((u64::MAX, v)), Cut::Beam(_)) => return (v.clone(), true),
+            _ => {}
+        }
+        if let Cut::Beam(_) = cut
+            && let Some(v) = self.beam_t.get(&(st, need))
+        {
+            return (v.clone(), false);
         }
         if self.tick() {
-            return Vec::new();
+            return (Vec::new(), false);
         }
+        let mut w = match cut {
+            Cut::Budget(b) if b != u64::MAX => self.post(&st, &s),
+            _ => Vec::new(),
+        };
+        let budget = match cut {
+            Cut::Budget(b) if b != u64::MAX && b < Self::deals(&w, c) => b,
+            _ => u64::MAX,
+        };
+        let cut = match cut {
+            Cut::Budget(_) => Cut::Budget(budget),
+            beam => beam,
+        };
+        let mut kept = true;
         let out = if Self::is_declarer_turn(&st) {
-            let moves = self.declarer_moves(&st, &s);
-            let vs = moves
-                .into_iter()
-                .flat_map(|(ch, _, _)| self.feasible_t(ch, need))
-                .collect();
-            if self.interrupted {
-                return Vec::new();
+            let mut all = Vec::new();
+            for (ch, _, _) in self.declarer_moves(&st, &s) {
+                let (vs, whole) = self.feasible_t(ch, need, cut);
+                if self.interrupted {
+                    return (Vec::new(), false);
+                }
+                kept &= whole;
+                all.extend(vs);
             }
-            maximal_sets(vs, s.len, None)
+            let mut out = maximal_sets(all, s.len, None);
+            out.retain(|&v| budget == u64::MAX || Self::deals(&w, c - v) <= budget);
+            if matches!(cut, Cut::Beam(k) if out.len() > k) && w.is_empty() {
+                w = self.post(&st, &s);
+            }
+            Self::trim(out, cut, &mut kept, |&v| Self::deals(&w, c - v))
         } else {
-            let mut acc = vec![c];
+            // Every vector lies in what each branch's vectors reach, so the
+            // merge starts there.
+            let mut start = c;
+            let mut subs = Vec::new();
             for (_, g, ch, won) in self.defender_moves(&st, &s, c) {
                 let sub_need = need - u8::from(won);
                 if sub_need == 0 {
                     continue;
                 }
                 let map = self.map(&st, &ch);
-                let ys = self.feasible_t(ch, sub_need);
+                let (vs, whole) = self.feasible_t(ch, sub_need, cut);
                 if self.interrupted {
-                    return Vec::new();
+                    return (Vec::new(), false);
                 }
+                kept &= whole;
                 let sub = maximal_sets(
-                    ys.iter()
+                    vs.iter()
                         .map(|y| g.iter().filter(|&i| y.contains(map[i])).collect())
+                        .filter(|&p| budget == u64::MAX || Self::deals(&w, g - p) <= budget)
                         .collect(),
                     s.len,
                     None,
                 );
+                start = start - (g - sub.iter().fold(Set::EMPTY, |a, &p| a | p));
+                let most = if budget == u64::MAX {
+                    0
+                } else {
+                    sub.iter().map(|&p| Self::deals(&w, p)).max().unwrap_or(0)
+                };
+                subs.push((g, sub, most));
+            }
+            // The order changes the work, not the answer; narrow branches
+            // first keeps the rows few while the budget bites.
+            // ponytail: the budget bites only while a state holds more deals
+            // than it, i.e. in the first trick; deeper the search is the
+            // full one.  KJ9753 - exact still takes 13 s in the lead's
+            // merge.  Giving each branch the budget left after the
+            // double-dummy losses off it measured no gain.
+            if budget != u64::MAX {
+                subs.sort_by_key(|(_, sub, _)| sub.len());
+            }
+            let mut acc = vec![start];
+            for b in 0..subs.len() {
+                let (g, ref sub, _) = subs[b];
+                // A vector loses at least what it holds in a later branch
+                // beyond the most any vector there holds.
+                let keep = |&r: &Set| {
+                    budget == u64::MAX
+                        || Self::deals(&w, c - r)
+                            + subs[b + 1..]
+                                .iter()
+                                .map(|&(h, _, most)| Self::deals(&w, r & h).saturating_sub(most))
+                                .max()
+                                .unwrap_or(0)
+                            <= budget
+                };
                 let mut next = Vec::new();
                 for &x in &acc {
                     // min on the branch's layouts: x loses those y lacks
                     next.extend(maximal_sets(
-                        sub.iter().map(|&y| x - (g - y)).collect(),
+                        sub.iter().map(|&y| x - (g - y)).filter(keep).collect(),
                         s.len,
                         None,
                     ));
                 }
-                // ponytail: grouping skips the tests that cannot succeed, not
-                // the rows; where the antichain itself explodes (KJ9753 -
-                // for 3 tricks: 700k vectors at one node) the next lever is
-                // sharing rows between equal `x ∩ g`, or pruning the moves.
                 acc = maximal_sets(next, s.len, Some(&g));
+                if matches!(cut, Cut::Beam(k) if acc.len() > k) && w.is_empty() {
+                    w = self.post(&st, &s);
+                }
+                acc = Self::trim(acc, cut, &mut kept, |&v| Self::deals(&w, c - v));
             }
             acc
         };
-        if !self.interrupted {
-            self.memo_t.insert((st, need), out.clone());
+        match cut {
+            Cut::Beam(_) if !kept => {
+                self.beam_t.insert((st, need), out.clone());
+            }
+            _ => {
+                self.memo_t.insert((st, need), (budget, out.clone()));
+            }
         }
-        out
+        (out, kept && budget == u64::MAX)
     }
 
     /// Each trick target's optimal vector from `st`, in tricks still needed
@@ -1936,6 +2249,60 @@ mod tests {
             }
             let plain = maximal(rows.clone(), len, None);
             assert_eq!(maximal(rows, len, Some(&mask)), plain);
+        }
+    }
+
+    /// After each opening lead, for every target and for expected tricks, a
+    /// budget keeps exactly the full antichain's vectors within it: searched
+    /// afresh, or reusing answers to larger and smaller budgets.  A beam's
+    /// vectors lie under the full antichain's.
+    #[test]
+    fn cuts_keep_what_they_promise() {
+        let pairs = [("AQT8", "642"), ("KQT32", "654"), ("A8", "JT62")];
+        for (north, south) in pairs {
+            let (north, south) = (north.parse().unwrap(), south.parse().unwrap());
+            let new = || Solver::new(north, south).unwrap();
+            let (mut full, mut reuse, mut beam) = (new(), new(), new());
+            let root = full.root();
+            let s = full.structure(root.live());
+            for (st, _, _) in full.declarer_moves(&root, &s) {
+                let c = Solver::consistent(&st, &s);
+                let w = full.post(&st, &s);
+                let cap = Solver::cap(&st);
+                let total = Solver::deals(&w, c);
+                let budgets = [0, 1, 2, 4, 6, 3, 1].map(|k| total * k / 8);
+                for need in 1..=full.max_tricks() {
+                    let (all, kept) = full.feasible_t(st, need, Cut::ALL);
+                    assert!(kept);
+                    for b in budgets {
+                        let within = |vs: Vec<Set>| -> Vec<Set> {
+                            vs.into_iter()
+                                .filter(|&v| Solver::deals(&w, c - v) <= b)
+                                .collect()
+                        };
+                        let fresh = new().feasible_t(st, need, Cut::Budget(b)).0;
+                        assert_eq!(within(fresh), within(all.clone()));
+                        let (some, _) = reuse.feasible_t(st, need, Cut::Budget(b));
+                        assert_eq!(within(some), within(all.clone()));
+                    }
+                    let (some, _) = beam.feasible_t(st, need, Cut::Beam(4));
+                    assert!(some.iter().all(|v| all.iter().any(|a| a.covers(v, s.len))));
+                }
+                let (all, _) = full.feasible(st, Cut::ALL);
+                for b in budgets.map(|b| b * u64::from(cap)) {
+                    let within = |vs: Vec<Tricks>| -> Vec<Tricks> {
+                        vs.into_iter()
+                            .filter(|v| Solver::lost(&w, c, cap, v) <= b)
+                            .collect()
+                    };
+                    let fresh = new().feasible(st, Cut::Budget(b)).0;
+                    assert_eq!(within(fresh), within(all.clone()));
+                    let (some, _) = reuse.feasible(st, Cut::Budget(b));
+                    assert_eq!(within(some), within(all.clone()));
+                }
+                let (some, _) = beam.feasible(st, Cut::Beam(4));
+                assert!(some.iter().all(|v| all.iter().any(|a| a.covers(v, s.len))));
+            }
         }
     }
 }
