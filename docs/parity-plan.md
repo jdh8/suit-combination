@@ -33,11 +33,11 @@ targets; double-dummy averages are upper bounds, not policies.
 | Capability | Today ([lib.rs](../src/lib.rs), [tests](../tests/solver.rs), [wasm](../web/src/lib.rs), [app.js](../web/app.js), [CLI](../examples/solve.rs)) | Gap |
 | --- | --- | --- |
 | Hidden-card analysis | Pareto vectors keep one strategy across indistinguishable layouts; targets (0/1 vectors) and `ExactExpected` are exhaustive | Little independent validation |
-| Expected tricks | `Expected` = combination of target lines plus an upper bound; exact mode separate | Fast EV is not always optimal (`A8 / JT62`: 1.644 vs 1.651) |
+| Expected tricks | `ExactExpected`, the exact search, is the one EV goal (the fast target-line mode was retired in phase 4) | No constraints for EV; no MP/IMP |
 | Probabilities | Fixed 13/13 vacant places, `TOTAL = C(26,13)` hard-coded in engine and browser | No vacant places, known cards, length or HCP constraints |
 | Entries and play | Unlimited entries, no ruffs by default; for trick targets, the starting hand, finite entries, round limits, a fixed first card, discards and one side's ruffs (`Constraints`) | None of these for EV; no overruffs |
 | Alternative lines | Values for every equivalent opening lead; one plan per goal | No line browser, line-by-layout matrix or comparison |
-| Goals | At-least-N, bounded EV, exact EV | No MP/IMP line comparison |
+| Goals | At-least-N, exact EV | No MP/IMP line comparison |
 | Coverage | Any holding: the limit is 256 layouts after merging interchangeable cards (at most 162 for any holding); only many known cards or an HCP range exceed it (`TooManyMissing`) | Over-limit constraint combinations are rejected, not solved |
 | Interface | Browser trainer, custom holdings, card grading, revealable tree, CLI, serializable Rust API | No analysis-first view, free defender branching, sharing or export |
 | Runtime control | Worker termination; random-deal and exact-EV budgets | No engine budget, retained progress or memory contract |
@@ -322,6 +322,21 @@ exact search, not on target lines.
    documented IMP convention. First fixtures: `AQ1098 / 5432` (EV vs MP) and
    `AJ98 / K32` (no best MP line).
 
+**Status 2026-10-18:** item 1 done.  `Goal::Expected`, its line search
+(`line`, `best_line`, `plan_line`, `adopt`, `memo_line`, `Game.reqs`),
+`Analysis::bound`/`proven` and `Lead::bound` (always equal to the score
+without it) are gone; `analyze_all`, the CLI's `ev`, the bench's `ev`, the
+wasm `expected()` and the trainer's EV all run `ExactExpected`.  Targets
+and exact EV are byte-identical to before on 3,000 combinations and 400 in
+exact mode.  Corpus at 30 s, 887 runs: all finish, p50 1.4 ms, p95 25.5 ms,
+max 12.2 s (`KJ9753 / -` ev), peak memory 86 MB (was 485 MB).  Found on
+the way, and not new: a plan card can grade below best in the `Game` (the
+plan keeps what the root's optimum needs; the game grades by the best from
+the current information): 793 target and 1,128 EV cards of 84,199 on 150
+random combinations, in 51 of them.  Only the fast line, greedy by
+construction, never did.  Phase 5 decides whether the plan breaks ties
+toward the locally best card or the trainer grades by the plan.
+
 **Done:** no fast-EV code left; EV fixtures pass on the exact search;
 published MP/IMP and cyclic cases agree under matching assumptions; target
 fixtures still pass.
@@ -348,8 +363,8 @@ for the measured scope.
 
 ## Next step and exclusions
 
-Phase 4, item 1: retire the fast `Expected` mode; `ExactExpected` becomes
-the one EV goal.
+Phase 4, item 2: extend the phase 3 constraints to expected tricks, each
+with an EV fixture.
 
 Not needed: rewrite, server backend, new framework, GPU search, full-deal AI,
 bidding inference. Mixed-strategy equilibria are a separate research question.

@@ -93,7 +93,7 @@ fn splits() {
     assert_eq!(tricks("AKQ32", "54", 5), three_three);
     assert_eq!(tricks("AKQ32", "54", 4), three_three + four_two);
     assert_eq!(
-        score("AKQ32", "54", Goal::Expected),
+        score("AKQ32", "54", Goal::ExactExpected),
         5 * three_three + 4 * four_two + 3 * (five_one + six_zero)
     );
 }
@@ -104,7 +104,10 @@ fn stiff_king_offside() {
     // Beats K onside plus a singleton K offside — better than a plain finesse.
     let two = TOTAL / 2 + binom(18, 6);
     assert_eq!(tricks("AQ3", "42", 2), two);
-    assert_eq!(score("AQ3", "42", Goal::Expected), 2 * two + (TOTAL - two));
+    assert_eq!(
+        score("AQ3", "42", Goal::ExactExpected),
+        2 * two + (TOTAL - two)
+    );
 }
 
 #[test]
@@ -147,37 +150,11 @@ fn plays_out_against_the_layout() {
 }
 
 #[test]
-fn expected_brackets_the_exact_search() {
-    let h = |s: &str| s.parse::<Holding>().unwrap();
-    // AQ3 opposite 42: one line is best for every target, so the bound is met.
-    // 3 opposite AKT9: the line is the best, but no line is best for every
-    // target.  A8 opposite JT62: the best average is on a line optimal for
-    // no target, which the combined line misses.
-    for (north, south, certified, exact) in [
-        ("AQ3", "42", true, true),
-        ("3", "AKT9", false, true),
-        ("A8", "JT62", false, false),
-    ] {
-        let (n, s) = (h(north), h(south));
-        let line = analyze(n, s, Goal::Expected).unwrap();
-        let best = analyze(n, s, Goal::ExactExpected).unwrap();
-        assert!(
-            line.score <= best.score && best.score <= line.bound,
-            "{north} {south}"
-        );
-        assert_eq!(line.score == line.bound, certified, "{north} {south}");
-        assert_eq!(line.score == best.score, exact, "{north} {south}");
-        assert_eq!(best.bound, best.score);
-        assert_eq!(
-            line.score,
-            line.leads.iter().map(|l| l.score).max().unwrap()
-        );
-    }
-}
-
-#[test]
-fn expected_line_plays_best_in_the_game() {
-    // Following the recommended line, every card it plays is graded best.
+fn expected_plan_plays_out_in_the_game() {
+    // The game follows the recommended line to the end.  Its cards are not
+    // all graded best: the plan keeps what the root's optimum needs, while
+    // the game grades by the best from here (A8 / JT62, West KQ: after
+    // West's Q the plan ducks, the game grades the A).
     let h = |s: &str| s.parse::<Holding>().unwrap();
     for (north, south, wests) in [
         ("AQ3", "42", ["K", "KJ", "J9876"]),
@@ -185,15 +162,16 @@ fn expected_line_plays_best_in_the_game() {
     ] {
         for west in wests {
             let mut solver = Solver::new(h(north), h(south)).unwrap();
-            let analysis = solver.analyze(Goal::Expected).unwrap();
-            let mut game = Game::new(&mut solver, h(west), Goal::Expected).unwrap();
+            let analysis = solver.analyze(Goal::ExactExpected).unwrap();
+            let mut game = Game::new(&mut solver, h(west), Goal::ExactExpected).unwrap();
             assert_eq!(game.moves(&mut solver), analysis.leads);
             let mut plan = &analysis.plan;
             while let Plan::Declarer { cards, then, .. } = plan {
                 let moves = game.moves(&mut solver);
-                let best = moves.iter().map(|l| l.score).max().unwrap();
-                let chosen = moves.iter().find(|l| l.cards == *cards).unwrap();
-                assert_eq!(chosen.score, best, "{north} {south} West {west}");
+                assert!(
+                    moves.iter().any(|l| l.cards == *cards),
+                    "{north} {south} West {west}"
+                );
                 let rank = cards.iter().next().unwrap();
                 let plays = game.play(&mut solver, rank).unwrap();
                 plan = then;
@@ -315,7 +293,6 @@ fn constraint_errors() {
     assert_eq!(error(solver([13, 1], "", "KJ")), Some(Error::NoLayout));
 
     let mut s = solver([13, 7], "", "K").unwrap();
-    assert_eq!(s.analyze(Goal::Expected).unwrap_err(), Error::Unsupported);
     assert_eq!(
         s.analyze(Goal::ExactExpected).unwrap_err(),
         Error::Unsupported

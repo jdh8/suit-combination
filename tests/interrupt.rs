@@ -65,13 +65,12 @@ fn par_map<T: Sync, R: Send>(items: &[T], f: impl Fn(&T) -> R + Sync) -> Vec<R> 
     out.into_iter().map(|(_, r)| r).collect()
 }
 
-/// Every trick target, then expected tricks (and `exact`ly)
-fn goals(north: Holding, south: Holding, exact: bool) -> Vec<Goal> {
+/// Every trick target, then expected tricks if `ev`
+fn goals(north: Holding, south: Holding, ev: bool) -> Vec<Goal> {
     let max = north.len().max(south.len()) as u8;
     (1..=max)
         .map(|target| Goal::Tricks { target })
-        .chain([Goal::Expected])
-        .chain(exact.then_some(Goal::ExactExpected))
+        .chain(ev.then_some(Goal::ExactExpected))
         .collect()
 }
 
@@ -85,13 +84,8 @@ fn stop_at(solver: &mut Solver, k: usize) {
 }
 
 /// An interrupted analysis may only bound the optimum from above: `best` is
-/// the fresh analysis, `exact` the exact expected tricks if known
-fn check_bound(
-    r: Result<Analysis, Error>,
-    best: &Analysis,
-    exact: Option<u64>,
-    what: &str,
-) -> bool {
+/// the fresh analysis
+fn check_bound(r: Result<Analysis, Error>, best: &Analysis, what: &str) -> bool {
     match r {
         Ok(a) => {
             assert_eq!(&a, best, "{what}");
@@ -99,16 +93,10 @@ fn check_bound(
         }
         Err(Error::Interrupted { bound, .. }) => {
             assert!(
-                bound >= best.bound,
+                bound >= best.score,
                 "{what}: bound {bound} < {}",
-                best.bound
+                best.score
             );
-            if !matches!(best.goal, Goal::Tricks { .. }) {
-                assert!(
-                    exact.is_none_or(|x| bound >= x),
-                    "{what}: bound {bound} < exact"
-                );
-            }
             true
         }
         Err(e) => panic!("{what}: {e}"),
@@ -134,8 +122,6 @@ struct Fresh {
     north: Holding,
     south: Holding,
     goals: Vec<(Goal, Analysis, usize)>,
-    /// Exact expected tricks, if among the goals
-    exact: Option<u64>,
 }
 
 /// Steps of [`resume`]: the first three polls, then 13ths of the way
@@ -158,7 +144,7 @@ fn resume(f: &Fresh, step: usize, every: u32) -> usize {
         };
         stop_at(&mut solver, k);
         let what = format!("{north} {south} {goal:?} k={k}");
-        stopped += usize::from(check_bound(solver.analyze(*goal), best, f.exact, &what));
+        stopped += usize::from(check_bound(solver.analyze(*goal), best, &what));
     }
     solver.clear_interrupt();
     for (goal, best, _) in &f.goals {
@@ -172,21 +158,19 @@ fn resume(f: &Fresh, step: usize, every: u32) -> usize {
 }
 
 /// [`resume`] every step of every combination
-fn resume_all(combos: &[(Holding, Holding)], every: u32, exact: bool) -> usize {
+fn resume_all(combos: &[(Holding, Holding)], every: u32, ev: bool) -> usize {
     let fresh = par_map(combos, |&(north, south)| {
-        let goals: Vec<_> = goals(north, south, exact)
+        let goals: Vec<_> = goals(north, south, ev)
             .into_iter()
             .map(|g| {
                 let best = Solver::new(north, south).unwrap().analyze(g).unwrap();
                 (g, best, polls(north, south, g, every))
             })
             .collect();
-        let exact = exact.then(|| goals.last().unwrap().1.score);
         Fresh {
             north,
             south,
             goals,
-            exact,
         }
     });
     let tasks: Vec<(&Fresh, usize)> = fresh
@@ -239,7 +223,7 @@ fn short_budgets_still_finish() {
             solver.set_poll_interval(1);
             200
         };
-        for goal in goals(n, s, false) {
+        for goal in goals(n, s, true) {
             let best = Solver::new(n, s).unwrap().analyze(goal).unwrap();
             let mut calls = 0;
             let a = loop {
@@ -247,7 +231,7 @@ fn short_budgets_still_finish() {
                 calls += 1;
                 match solver.analyze(goal) {
                     Ok(a) => break a,
-                    Err(Error::Interrupted { bound, .. }) => assert!(bound >= best.bound),
+                    Err(Error::Interrupted { bound, .. }) => assert!(bound >= best.score),
                     Err(e) => panic!("{e}"),
                 }
                 assert!(calls < 100_000, "{n} {s} {goal:?} makes no progress");
@@ -280,8 +264,8 @@ fn double_dummy_bounds_single_dummy() {
         for goal in goals(n, s, n.len() + s.len() >= 7) {
             let a = solver.analyze(goal).unwrap();
             if let Some(dd) = double_dummy(n, s, goal) {
-                assert!(dd >= a.bound, "{n} {s} {goal:?}: {dd} < {}", a.bound);
-                above += usize::from(dd > a.bound);
+                assert!(dd >= a.score, "{n} {s} {goal:?}: {dd} < {}", a.score);
+                above += usize::from(dd > a.score);
             }
         }
         above
@@ -299,42 +283,4 @@ fn double_dummy_bounds_single_dummy() {
     let goal = Goal::Tricks { target: 5 };
     let sd = Solver::new(n, s).unwrap().analyze(goal).unwrap().score;
     assert_eq!(double_dummy(n, s, goal), Some(sd));
-}
-
-#[test]
-#[cfg_attr(debug_assertions, ignore = "slow unoptimized: run with --release")]
-fn lead_bounds_hold() {
-    let mut combos = random_combos(150, 3, 6, 0x2545_F491_4F6C_DD1D);
-    combos.extend([("A8", "JT62"), ("3", "AKT9")].map(|(n, s)| (holding(n), holding(s))));
-    par_map(&combos, |&(n, s)| {
-        let mut solver = Solver::new(n, s).unwrap();
-        for goal in goals(n, s, false) {
-            let a = solver.analyze(goal).unwrap();
-            assert_eq!(a.proven, a.score == a.bound);
-            for l in &a.leads {
-                assert!(
-                    l.score <= l.bound && l.bound <= a.bound,
-                    "{n} {s} {goal:?} {l:?}"
-                );
-                if goal != Goal::Expected {
-                    assert_eq!(l.score, l.bound);
-                }
-            }
-        }
-        // Each lead's bound holds the best line after that lead.
-        let line = solver.analyze(Goal::Expected).unwrap();
-        let exact = solver.analyze(Goal::ExactExpected).unwrap();
-        assert!(exact.proven && exact.leads.iter().all(|l| l.score == l.bound));
-        for l in &line.leads {
-            let best = exact
-                .leads
-                .iter()
-                .find(|x| x.seat == l.seat && x.cards == l.cards)
-                .unwrap();
-            assert!(
-                l.score <= best.score && best.score <= l.bound,
-                "{n} {s} {l:?} {best:?}"
-            );
-        }
-    });
 }

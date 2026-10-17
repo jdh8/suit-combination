@@ -99,34 +99,17 @@ impl Trainer {
         Ok(serde_json::Value::from(all).to_string())
     }
 
-    /// [`analyze`](Self::analyze) for expected tricks as JSON: from the
-    /// targets' lines (fast, with a bound), or `exact`ly, which keeps full
-    /// vectors and can take minutes
-    pub fn expected(&mut self, exact: bool) -> Result<String, JsValue> {
-        let goal = if exact {
-            Goal::ExactExpected
-        } else {
-            Goal::Expected
-        };
-        Ok(self.analyze(goal)?.to_string())
+    /// [`analyze`](Self::analyze) for expected tricks as JSON
+    pub fn expected(&mut self) -> Result<String, JsValue> {
+        Ok(self.analyze(Goal::ExactExpected)?.to_string())
     }
 
     /// Deal `west` the given cards (East gets the rest) and start playing
-    /// for `target` tricks, or for expected tricks (`exact`ly or not) when
-    /// `target` is absent.  Returns the opening snapshot.  Play runs to the
+    /// for `target` tricks, or for expected tricks when `target` is absent.  Returns the opening snapshot.  Play runs to the
     /// end of each call, whatever the budget, on what the analysis memoized.
-    pub fn start(
-        &mut self,
-        west: &str,
-        target: Option<u8>,
-        exact: bool,
-    ) -> Result<String, JsValue> {
+    pub fn start(&mut self, west: &str, target: Option<u8>) -> Result<String, JsValue> {
         let west: Holding = west.parse().map_err(|e| err(format!("West: {e}")))?;
-        let goal = match target {
-            Some(target) => Goal::Tricks { target },
-            None if exact => Goal::ExactExpected,
-            None => Goal::Expected,
-        };
+        let goal = target.map_or(Goal::ExactExpected, |target| Goal::Tricks { target });
         self.game = Some(Game::new(&mut self.solver, west, goal).map_err(err)?);
         self.snapshot(vec![])
     }

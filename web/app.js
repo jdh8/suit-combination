@@ -70,11 +70,10 @@ function call(op, args = [], budget = undefined, ms = undefined) {
 
 // --- goals and searches -----------------------------------------------------
 
-// Goals by key: `t3` for three tricks, `ev` for the targets' combined line,
-// `exact` for the exact expected-tricks search
-const goalKey = (goal) => (goal.kind === 'tricks' ? `t${goal.target}` : goal.kind === 'expected' ? 'ev' : 'exact');
-const goalOf = (key) => (key === 'ev' ? { kind: 'expected' } : key === 'exact' ? { kind: 'exact_expected' } : { kind: 'tricks', target: Number(key.slice(1)) });
-const goalLabel = (key) => (key === 'ev' ? 'EV' : key === 'exact' ? 'EV (exact)' : `≥${key.slice(1)}`);
+// Goals by key: `t3` for three tricks, `ev` for expected tricks
+const goalKey = (goal) => (goal.kind === 'tricks' ? `t${goal.target}` : 'ev');
+const goalOf = (key) => (key === 'ev' ? { kind: 'exact_expected' } : { kind: 'tricks', target: Number(key.slice(1)) });
+const goalLabel = (key) => (key === 'ev' ? 'EV' : `≥${key.slice(1)}`);
 // An Analysis, not {interrupted, bound}
 const finished = (r) => r !== undefined && !r.interrupted;
 // Searched as far as it can go: finished, or stopped for memory
@@ -82,7 +81,7 @@ const closed = (r) => finished(r) || r?.memory;
 const secs = (ms) => `${(ms / 1000).toFixed(1)} s`;
 
 function solveGoal(key, budget, ms) {
-  const [op, args] = key === 'ev' ? ['expected', [false]] : key === 'exact' ? ['expected', [true]] : ['target', [Number(key.slice(1))]];
+  const [op, args] = key === 'ev' ? ['expected', []] : ['target', [Number(key.slice(1))]];
   return call(op, args, budget, ms).then(JSON.parse);
 }
 
@@ -116,20 +115,12 @@ async function load(s) {
   s.warm.clear();
 }
 
-// The goal asked for is done: for expected tricks, the line is proven best
-// or the exact search has finished too.
-function settled(s) {
-  const r = s.results.get(s.want);
-  if (!finished(r)) return false;
-  return s.want !== 'ev' || r.proven || finished(s.results.get('exact'));
-}
-
-// Expected tricks not asked for wait for the targets, whose searches they
-// would only go on with (where one costly state can hold a slice for seconds)
+// Expected tricks not asked for wait for the targets, which show sooner (one
+// costly state of the expected-tricks search can hold a slice for seconds)
 const waits = (s, key) => key !== s.want && !key.startsWith('t') && s.keys.some((k) => k.startsWith('t') && !closed(s.results.get(k)) && s.results.has(k));
 
 // Solves the open goals of `s` in slices of SLICE ms, round robin, until
-// all are finished, the goal asked for is settled (after every goal has had
+// all are finished, the goal asked for is finished (after every goal has had
 // a turn), SESSION ms pass, or the user cancels; then, if no game is on yet,
 // plays the goal asked for when it is finished.  Cancelling keeps every
 // result so far.
@@ -155,10 +146,8 @@ async function runSearch(s) {
         s.results.set(key, r);
         if (finished(r)) s.warm.add(key);
         full ||= r.memory;
-        // The combined line is not proven best: the exact search may beat it.
-        if (key === 'ev' && s.want === 'ev' && finished(r) && !r.proven && !s.keys.includes('exact')) s.keys.push('exact');
       }
-      if (settled(s)) break;
+      if (finished(s.results.get(s.want))) break;
     }
   } catch (e) {
     failed = e.message;
@@ -171,8 +160,7 @@ async function runSearch(s) {
   try {
     // Play what has finished, after a cancel or a crash too
     if (search === s && problem?.search !== s) {
-      const exact = s.results.get('exact');
-      const a = s.want === 'ev' && finished(exact) ? exact : s.results.get(s.want);
+      const a = s.results.get(s.want);
       if (finished(a)) await setProblem(s, a);
     }
   } catch (e) {
@@ -198,8 +186,8 @@ function cancel() {
   }, HARD_STOP);
 }
 
-// One goal's status: proven, best found (with the bound), or interrupted
-// (with the bound); `solving` while its slice runs
+// One goal's status: its value, or interrupted (with the bound); `solving`
+// while its slice runs
 function goalStatus(s, key) {
   const r = s.results.get(key);
   const label = `<b>${goalLabel(key)}</b>`;
@@ -211,8 +199,7 @@ function goalStatus(s, key) {
   if (r === undefined) return `${label} waiting`;
   if (r.memory) return `${label} out of memory${bound}`;
   if (r.interrupted) return `${label} interrupted${bound}`;
-  if (r.proven) return `${label} ${at(r.goal, r.score)} proven`;
-  return `${label} ${at(r.goal, r.score)} best found (≤ ${at(r.goal, r.bound)})`;
+  return `${label} ${at(r.goal, r.score)}`;
 }
 
 // The goals strip, the buttons, and while searching the elapsed time
@@ -304,9 +291,7 @@ async function newProblem() {
 }
 
 // Every target and expected tricks of a random combination within
-// RANDOM_BUDGET in all, or null if that is not enough.  When the line is
-// not proven best, the exact search gets the time left, and replaces the
-// line if it finishes.
+// RANDOM_BUDGET in all, or null if that is not enough
 async function solveRandom(s) {
   const deadline = performance.now() + RANDOM_BUDGET;
   const left = () => deadline - performance.now();
@@ -320,23 +305,13 @@ async function solveRandom(s) {
       s.results.set(key, r);
       s.warm.add(key);
     }
-    if (!s.results.get('ev').proven && left() > 0) {
-      s.keys.push('exact');
-      const r = await solveGoal('exact', left(), left() + 1000);
-      s.results.set('exact', r);
-      if (finished(r)) s.warm.add('exact');
-    }
   } catch (e) {
     if (String(e.message).startsWith('gave up')) return null;
     throw e;
   } finally {
     s.running = false;
   }
-  const exact = s.results.get('exact');
-  return s.keys
-    .filter((k) => k.startsWith('t'))
-    .map((k) => s.results.get(k))
-    .concat(finished(exact) ? exact : s.results.get('ev'));
+  return s.keys.map((k) => s.results.get(k));
 }
 
 // Accepts "aj52", "A J 10 2", "AJT2"; returns ranks in descending order.
@@ -374,7 +349,7 @@ async function setProblem(s, analysis) {
   const missing = [...RANKS].filter((c) => !north.includes(c) && !south.includes(c)).map((c) => RANKS.indexOf(c) + 2);
   const west = fmt(shuffle([...missing, ...Array(26 - missing.length).fill(0)]).slice(0, 13).filter(Boolean));
   const target = analysis.goal.kind === 'tricks' ? analysis.goal.target : undefined;
-  const snap = JSON.parse(await call('start', [west, target, analysis.goal.kind === 'exact_expected']));
+  const snap = JSON.parse(await call('start', [west, target]));
   if (search !== s) return;
   const suit = SUITS[Math.floor(Math.random() * SUITS.length)];
   problem = { search: s, north, south, suit, analysis, snap, plays: [...snap.plays], log: [], lead: null, done: false, busy: false };
@@ -478,7 +453,7 @@ function render() {
   const s = document.createElement('p');
   s.className = 'status';
   s.innerHTML = `<span>Tricks won: ${snap.won}</span>`
-    + (playing ? `<span>${analysis.proven ? 'Best' : 'Best found'} from here: ${value(analysis.goal, Math.max(...snap.moves.map((m) => m.score)), snap.weight)}</span>
+    + (playing ? `<span>Best from here: ${value(analysis.goal, Math.max(...snap.moves.map((m) => m.score)), snap.weight)}</span>
       <button class="secondary" id="reveal">Show solution</button>` : '');
   el.appendChild(s);
   if (playing) id('reveal').onclick = finish;
@@ -509,7 +484,7 @@ async function play(rank) {
   log.push({
     ok,
     text: `Trick ${Math.floor(plays.length / 4) + 1}, ${chosen.seat} ${cardText(rank)}: ${value(goal, chosen.score, snap.weight)}`
-      + (ok ? '' : `; ${analysis.proven ? 'best' : 'best found'} ${value(goal, best, snap.weight)} with ${alternatives}`),
+      + (ok ? '' : `; best ${value(goal, best, snap.weight)} with ${alternatives}`),
   });
   // Every state was memoized by the analysis, so this is quick.
   let next;
@@ -547,29 +522,19 @@ function finish() {
     verdict = `${snap.won} tricks taken`;
   }
   const mistakes = log.filter((l) => !l.ok).length;
-  const bestWord = analysis.proven ? 'best' : 'the best found';
-  const played = log.length ? ` — ${mistakes === 0 ? `every card was ${bestWord}` : `${mistakes} card${mistakes === 1 ? '' : 's'} not ${bestWord}`}` : '';
-  // Unproven, each lead shows what no line after it can beat.
+  const played = log.length ? ` — ${mistakes === 0 ? 'every card was best' : `${mistakes} card${mistakes === 1 ? '' : 's'} not best`}` : '';
   const rows = [...analysis.leads]
     .sort((a, b) => b.score - a.score)
     .map((l) => `<tr class="${l.score === best ? 'best' : ''} ${lead && l.seat === lead.seat && l.cards === lead.cards ? 'chosen' : ''}">
-      <td>${l.seat}: ${cardsText(l.cards)}</td><td class="num">${value(goal, l.score, TOTAL)}</td>
-      <td class="num">${l.bound > l.score ? `≤ ${value(goal, l.bound, TOTAL)}` : ''}</td></tr>`)
+      <td>${l.seat}: ${cardsText(l.cards)}</td><td class="num">${value(goal, l.score, TOTAL)}</td></tr>`)
     .join('');
-  // The expected-tricks line when neither its bound nor the exact search
-  // (out of time) showed it is the best
-  const exact = problem.search.results.get('exact');
-  const since = finished(exact) && analysis !== exact ? ` The exact search, finished since, gives ${value(goal, exact.score, TOTAL)}.` : '';
-  const unproven = analysis.proven
-    ? ''
-    : `<p class="note">Best line found; the best possible is at most ${value(goal, analysis.bound, TOTAL)}, so a line here may be graded best that is not.${since}</p>`;
   const fb = id('feedback');
   fb.classList.remove('hidden');
   fb.innerHTML = `
     <p class="verdict ${ok ? 'ok' : 'no'}">${verdict}${played}</p>
     <div class="panel-title">Every lead</div>
     <table class="leads">${rows}</table>
-    <div class="panel-title">${analysis.proven ? 'Optimal line' : 'Line found'}</div>${unproven}
+    <div class="panel-title">Optimal line</div>
     <div class="plan"><ul>${planItems(analysis.plan, goal)}</ul></div>
     <p style="margin:0.8rem 0 0"><button class="primary" id="next">Next problem</button></p>`;
   id('next').onclick = newProblem;

@@ -22,10 +22,7 @@
 //! That holds for every trick target and for [`Goal::ExactExpected`].  Only
 //! the best vector counts in the end, so the search first finds a good line
 //! cheaply, then keeps only the vectors that might still beat it: one that
-//! already loses more deals than the good line cannot.  [`Goal::Expected`]
-//! instead combines the targets' optimal lines, which is fast, and brackets
-//! the true optimum between the line found ([`Analysis::score`]) and the sum
-//! of the targets' success probabilities ([`Analysis::bound`]).
+//! already loses more deals than the good line cannot.
 //!
 //! A search can be stopped early by [`Solver::set_interrupt`]:
 //! [`Solver::analyze`] then fails with [`Error::Interrupted`], which still
@@ -136,11 +133,6 @@ impl std::error::Error for Error {}
 pub enum Goal {
     /// At least this many tricks in the suit
     Tricks { target: u8 },
-    /// The most tricks on average, as well as the trick targets' optimal
-    /// lines combine: at every turn declarer may follow one of them or
-    /// switch to the best from there.  Usually the optimum, and
-    /// [`Analysis::bound`] says when it surely is.
-    Expected,
     /// The most tricks on average, by the exact search over full "tricks
     /// per layout" vectors, which can take seconds
     ExactExpected,
@@ -182,12 +174,6 @@ pub struct Lead {
     pub cards: Holding,
     /// Best [`Analysis::score`] after this lead
     pub score: u64,
-    /// At least the best score of any line starting with this lead: equal
-    /// to `score` except for [`Goal::Expected`], where it is the sum of every
-    /// target's score after the lead.  [`Analysis::bound`] is one bound for
-    /// every lead; `score == bound` here proves this lead's line the best
-    /// after it.
-    pub bound: u64,
 }
 
 /// Result of [`analyze`]
@@ -201,12 +187,6 @@ pub struct Analysis {
     /// optimal line beats; otherwise the line's expected tricks times
     /// `total`
     pub score: u64,
-    /// At least the best `score` of any line: equal to it except for
-    /// [`Goal::Expected`], where it is the sum of every target's score
-    pub bound: u64,
-    /// `score == bound`: the line is the best there is.  Otherwise the best
-    /// lies in `score..=bound`.
-    pub proven: bool,
     pub leads: Vec<Lead>,
     pub plan: Plan,
     /// Weight of every layout: [`TOTAL`] without [`Constraints`]
@@ -325,7 +305,7 @@ pub fn analyze(north: Holding, south: Holding, goal: Goal) -> Result<Analysis, E
 }
 
 /// [`analyze`] for every target from one trick up to the longer hand's
-/// length, then for [`Goal::Expected`]
+/// length, then for [`Goal::ExactExpected`]
 pub fn analyze_all(north: Holding, south: Holding) -> Result<Vec<Analysis>, Error> {
     Solver::new(north, south)?.analyze_all()
 }
@@ -971,8 +951,6 @@ pub struct Solver {
     beam_t: FxMap<(State, u8), Vec<Set>>,
     /// [`Structure::map_to`] by the live cards of parent and child
     maps: FxMap<(u16, u16), Rc<[usize]>>,
-    /// [`Goal::Expected`] lines by state and requirement followed
-    memo_line: FxMap<(State, Tricks), (Tricks, Step)>,
     /// See [`set_interrupt`](Self::set_interrupt)
     interrupt: Option<Box<dyn FnMut(usize) -> bool>>,
     /// Memo misses between polls of `interrupt`, and since the last poll
@@ -988,19 +966,6 @@ pub struct Solver {
 
 /// Memo misses between polls of [`Solver::set_interrupt`]'s callback
 const POLL_EVERY: u32 = 1024;
-
-/// How a [`Goal::Expected`] line goes on from a state
-#[derive(Debug, Clone, Copy)]
-enum Step {
-    /// No more tricks to be had
-    Done,
-    /// Adopt this target's vector of [`Solver::adopt`]
-    Adopt(usize),
-    /// Play this move of [`Solver::declarer_moves`]
-    Move(usize),
-    /// A defender plays; the requirement passes to each branch
-    Branch,
-}
 
 impl Solver {
     pub fn new(north: Holding, south: Holding) -> Result<Self, Error> {
@@ -1045,7 +1010,6 @@ impl Solver {
             beam: FxMap::default(),
             beam_t: FxMap::default(),
             maps: FxMap::default(),
-            memo_line: FxMap::default(),
             interrupt: None,
             poll_every: POLL_EVERY,
             misses: 0,
@@ -1110,7 +1074,7 @@ impl Solver {
             self.misses += 1;
             if self.misses >= self.poll_every {
                 self.misses = 0;
-                let states = self.memo.len() + self.memo_t.len() + self.memo_line.len();
+                let states = self.memo.len() + self.memo_t.len();
                 self.interrupted = self.interrupt.as_mut().is_some_and(|f| f(states));
             }
         }
@@ -1120,7 +1084,7 @@ impl Solver {
     /// Diagnostics for benchmarks: memoized states and the largest antichain
     #[doc(hidden)]
     pub fn stats(&self) -> (usize, usize) {
-        let states = self.memo.len() + self.memo_t.len() + self.memo_line.len();
+        let states = self.memo.len() + self.memo_t.len();
         let widest = self
             .memo
             .values()
@@ -1206,7 +1170,7 @@ impl Solver {
         c.iter()
             .map(|i| match goal {
                 Goal::Tricks { target } => u64::from(v.get(i) + won >= target) * s.weight[i],
-                Goal::Expected | Goal::ExactExpected => u64::from(v.get(i) + won) * s.weight[i],
+                Goal::ExactExpected => u64::from(v.get(i) + won) * s.weight[i],
             })
             .sum()
     }
@@ -1226,8 +1190,7 @@ impl Solver {
                 vs.iter().any(|v| v.covers(req, len))
             }
             // Every nonzero lane of `req` holds the same count on this path.
-            // A Goal::Expected line follows trick targets' vectors.
-            Goal::Tricks { .. } | Goal::Expected => {
+            Goal::Tricks { .. } => {
                 let need = (0..len).map(|i| req.get(i)).max().unwrap_or(0);
                 let req: Set = (0..len).filter(|&i| req.get(i) > 0).collect();
                 let budget = match self.memo_t.get(&(st, need)) {
@@ -1286,21 +1249,17 @@ impl Solver {
                 }
                 best.unwrap_or((0, Tricks::ZERO))
             }
-            Goal::Expected => {
-                let t = self.line(st, Tricks::ZERO);
-                (Self::score(&s, c, goal, won, &t), t)
-            }
         }
     }
 
     /// [`Analysis`] for every target from one trick up to the longer hand's
-    /// length, then for [`Goal::Expected`] unless there are [`Constraints`];
-    /// the first goal interrupted ends it
+    /// length, then for [`Goal::ExactExpected`] unless there are
+    /// [`Constraints`]; the first goal interrupted ends it
     pub fn analyze_all(&mut self) -> Result<Vec<Analysis>, Error> {
         let ev = self.constraints == Constraints::default();
         (1..=self.max_tricks())
             .map(|target| Goal::Tricks { target })
-            .chain(ev.then_some(Goal::Expected))
+            .chain(ev.then_some(Goal::ExactExpected))
             .map(|goal| self.analyze(goal))
             .collect()
     }
@@ -1326,31 +1285,15 @@ impl Solver {
     fn search(&mut self, goal: Goal) -> Result<Analysis, Error> {
         let root = self.root();
         let structure = self.structure(root.live());
-        let c = Self::consistent(&root, &structure);
         let moves = self.declarer_moves(&root, &structure);
-        let reqs = match goal {
-            Goal::Expected => self.adopt(root, c),
-            _ => Vec::new(),
-        };
         let mut leads = Vec::new();
         let mut best: Option<(u64, Tricks, usize)> = None;
         for (i, &(st, at, cards)) in moves.iter().enumerate() {
-            let (score, v) = match goal {
-                Goal::Expected => {
-                    let (t, r) = self.best_line(st, &reqs);
-                    (Self::score(&structure, c, goal, 0, &t), r)
-                }
-                _ => self.value(st, goal, 0),
-            };
-            let bound = match goal {
-                Goal::Expected => self.target_sum(st, 0),
-                _ => score,
-            };
+            let (score, v) = self.value(st, goal, 0);
             leads.push(Lead {
                 seat: seat(at),
                 cards: Holding::from_bits_truncate(cards),
                 score,
-                bound,
             });
             if best.is_none_or(|(s, _, _)| score > s) {
                 best = Some((score, v, i));
@@ -1363,38 +1306,21 @@ impl Solver {
                 req.set(i, req.get(i) * target);
             }
         }
-        let then = match goal {
-            Goal::Expected => self.plan_line(moves[i].0, req),
-            _ => self.plan(moves[i].0, req, goal),
-        };
+        let then = self.plan(moves[i].0, req, goal);
         let plan = Plan::Declarer {
             seat: leads[i].seat,
             cards: leads[i].cards,
             then: Box::new(then),
-        };
-        let bound = match goal {
-            Goal::Expected => self.target_sum(root, 0),
-            _ => score,
         };
         Ok(Analysis {
             north: self.north,
             south: self.south,
             goal,
             score,
-            bound,
-            proven: score == bound,
             leads,
             plan,
             total: structure.weight.iter().sum(),
         })
-    }
-
-    /// Sum over the targets of their best score from `st` after `won`
-    /// tricks: no line from there makes more tricks on average
-    fn target_sum(&mut self, st: State, won: u8) -> u64 {
-        (1..=self.max_tricks())
-            .map(|target| self.value(st, Goal::Tricks { target }, won).0)
-            .sum()
     }
 
     /// Upper bound on the best score for `goal` from what an interrupted
@@ -1968,9 +1894,6 @@ pub struct Game {
     /// Cards still held by East, West
     hands: [u16; 2],
     won: u8,
-    /// For [`Goal::Expected`], the target vectors (in tricks still needed)
-    /// that declarer's play so far still follows
-    reqs: Vec<Tricks>,
 }
 
 impl Game {
@@ -1997,20 +1920,12 @@ impl Game {
         if s.weight[layout] == 0 {
             return Err(Error::BadWest);
         }
-        let reqs = match goal {
-            Goal::Expected => {
-                let s = solver.structure(st.live());
-                solver.adopt(st, Solver::consistent(&st, &s))
-            }
-            _ => Vec::new(),
-        };
         Ok(Self {
             goal,
             st,
             west,
             hands: [solver.missing & !west, west],
             won: 0,
-            reqs,
         })
     }
 
@@ -2045,28 +1960,13 @@ impl Game {
     /// reach after it; empty once the suit is played out
     pub fn moves(&self, solver: &mut Solver) -> Vec<Lead> {
         let s = solver.structure(self.st.live());
-        let c = Solver::consistent(&self.st, &s);
         solver
             .declarer_moves(&self.st, &s)
             .into_iter()
-            .map(|(ch, at, cards)| {
-                let (score, bound) = match self.goal {
-                    Goal::Expected => {
-                        let (t, _) = solver.best_line(ch, &self.reqs);
-                        let score = Solver::score(&s, c, self.goal, self.won, &t);
-                        (score, solver.target_sum(ch, self.won))
-                    }
-                    _ => {
-                        let score = solver.value(ch, self.goal, self.won).0;
-                        (score, score)
-                    }
-                };
-                Lead {
-                    seat: seat(at),
-                    cards: Holding::from_bits_truncate(cards),
-                    score,
-                    bound,
-                }
+            .map(|(ch, at, cards)| Lead {
+                seat: seat(at),
+                cards: Holding::from_bits_truncate(cards),
+                score: solver.value(ch, self.goal, self.won).0,
             })
             .collect()
     }
@@ -2083,9 +1983,6 @@ impl Game {
             .find(|&(_, _, class)| class >> r & 1 != 0)
             .ok_or(Error::NotPlayable)?;
         self.st = solver.declarer_play(&self.st, &s, at, r);
-        let st = self.st;
-        self.reqs
-            .retain(|r| solver.guarantees(st, r, s.len, Goal::Expected));
         let mut plays = vec![Play {
             seat: seat(at),
             card: Some(rank),
@@ -2147,17 +2044,6 @@ impl Game {
                     let (vs, _) = solver.feasible(ch, Cut::ALL);
                     vs.iter().map(|v| v.get(layout)).max().unwrap_or(0)
                 }
-                // The most tricks declarer could be sure of on this layout,
-                // which the 0/1 searches answer exactly
-                Goal::Expected => (1..)
-                    .take_while(|&k| {
-                        solver
-                            .feasible_t(ch, k, Cut::ALL)
-                            .0
-                            .iter()
-                            .any(|v| v.contains(layout))
-                    })
-                    .count() as u8,
             };
             let key = (outcome, solver.value(ch, self.goal, won).0);
             if best.is_none_or(|(k, _)| key < k) {
@@ -2165,15 +2051,7 @@ impl Game {
             }
         }
         let (_, m) = best.expect("a defender can always follow or show out");
-        let (card, g, ch, trick) = moves[m];
-        let map = solver.map(&st, &ch);
-        self.reqs = self
-            .reqs
-            .iter()
-            .map(|r| Solver::pass(r, g, &map, trick))
-            .filter(|r| *r != Tricks::ZERO)
-            .collect();
-        self.reqs.dedup();
+        let (card, _, ch, trick) = moves[m];
         let won = self.won + u8::from(trick);
         let card = match card {
             Card::Class(k) => Some(lowest(hand & s.classes[k].ranks)),
@@ -2394,164 +2272,6 @@ impl Solver {
             }
         }
         (out, kept && budget == u64::MAX)
-    }
-
-    /// Each trick target's optimal vector from `st`, in tricks still needed
-    /// on the layouts it wins, for every target some layout can still reach
-    fn adopt(&mut self, st: State, c: Set) -> Vec<Tricks> {
-        let mut out = Vec::new();
-        for need in 1.. {
-            let (score, v) = self.value(st, Goal::Tricks { target: need }, 0);
-            if score == 0 {
-                break;
-            }
-            let mut r = Tricks::ZERO;
-            for i in c.iter() {
-                r.set(i, v.get(i) * need);
-            }
-            out.push(r);
-        }
-        out
-    }
-
-    /// `req` on the child after a defender's card that keeps the layouts `g`
-    /// (lifted by `map`), less the trick if declarer won it
-    fn pass(req: &Tricks, g: Set, map: &[usize], won: bool) -> Tricks {
-        let mut sub = Tricks::ZERO;
-        for i in g.iter() {
-            let r = req.get(i).saturating_sub(u8::from(won));
-            sub.set(map[i], sub.get(map[i]).max(r));
-        }
-        sub
-    }
-
-    /// Tricks per layout from `st` of the [`Goal::Expected`] line that
-    /// follows `req` (tricks still needed per layout, from some target's
-    /// optimal vector; zero = none yet).  At each declarer turn it plays,
-    /// of the moves that keep `req`, the one of most expected tricks; where
-    /// `req` runs out (made, or hopeless), it adopts whichever target's
-    /// vector from there gives the most.  Dropping `req` anywhere else is not
-    /// an option: a falsecarding defender sends each layout down its worst
-    /// branch, so a switch that looks better from one state can lose overall.
-    // ponytail: greedy over a few vectors per state, so a lower bound on the
-    // best; Goal::ExactExpected is the exact (exponential) search.
-    fn line(&mut self, st: State, req: Tricks) -> Tricks {
-        if let Some(&(t, _)) = self.memo_line.get(&(st, req)) {
-            return t;
-        }
-        if self.tick() {
-            return Tricks::ZERO;
-        }
-        let s = self.structure(st.live());
-        let c = Self::consistent(&st, &s);
-        let ev = |t: &Tricks| Self::score(&s, c, Goal::Expected, 0, t);
-        let (t, step) = if st.played == 0 && st.ns == [0; 2] {
-            (Tricks::ZERO, Step::Done)
-        } else if req == Tricks::ZERO {
-            let mut best = (0, Tricks::ZERO, Step::Done);
-            for (j, r) in self.adopt(st, c).into_iter().enumerate() {
-                let t = self.line(st, r);
-                if ev(&t) > best.0 {
-                    best = (ev(&t), t, Step::Adopt(j));
-                }
-            }
-            (best.1, best.2)
-        } else if Self::is_declarer_turn(&st) {
-            let mut best: Option<(u64, Tricks, Step)> = None;
-            for (k, (ch, _, _)) in self.declarer_moves(&st, &s).into_iter().enumerate() {
-                if !self.guarantees(ch, &req, s.len, Goal::Expected) {
-                    continue;
-                }
-                let t = self.line(ch, req);
-                if best.is_none_or(|(b, _, _)| ev(&t) > b) {
-                    best = Some((ev(&t), t, Step::Move(k)));
-                }
-            }
-            if self.interrupted {
-                return Tricks::ZERO;
-            }
-            let (_, t, step) = best.expect("req is feasible, so some move keeps it");
-            (t, step)
-        } else {
-            let mut t = Tricks::ZERO;
-            for i in c.iter() {
-                t.set(i, 127);
-            }
-            for (_, g, ch, won) in self.defender_moves(&st, &s, c) {
-                let map = self.map(&st, &ch);
-                let sub = self.line(ch, Self::pass(&req, g, &map, won));
-                for i in g.iter() {
-                    t.set(i, t.get(i).min(sub.get(map[i]) + u8::from(won)));
-                }
-            }
-            (t, Step::Branch)
-        };
-        if !self.interrupted {
-            self.memo_line.insert((st, req), (t, step));
-        }
-        t
-    }
-
-    /// The best [`line`](Self::line) from `st`: following one of `reqs`
-    /// that `st` still guarantees, or starting afresh.  Returns its tricks
-    /// per layout and the requirement followed (zero = afresh).
-    fn best_line(&mut self, st: State, reqs: &[Tricks]) -> (Tricks, Tricks) {
-        let s = self.structure(st.live());
-        let c = Self::consistent(&st, &s);
-        let mut best: Option<(u64, Tricks, Tricks)> = None;
-        for &r in reqs.iter().chain(&[Tricks::ZERO]) {
-            if r != Tricks::ZERO && !self.guarantees(st, &r, s.len, Goal::Expected) {
-                continue;
-            }
-            let t = self.line(st, r);
-            let ev = Self::score(&s, c, Goal::Expected, 0, &t);
-            if best.is_none_or(|(b, _, _)| ev > b) {
-                best = Some((ev, t, r));
-            }
-        }
-        let (_, t, r) = best.expect("switching afresh is always an option");
-        (t, r)
-    }
-
-    /// The [`line`](Self::line) from `st` following `req`, as a [`Plan`]
-    fn plan_line(&mut self, st: State, req: Tricks) -> Plan {
-        self.line(st, req);
-        if self.interrupted {
-            return Plan::Hopeless;
-        }
-        let s = self.structure(st.live());
-        let c = Self::consistent(&st, &s);
-        match self.memo_line[&(st, req)].1 {
-            Step::Done => Plan::Made,
-            Step::Adopt(j) => {
-                let r = self.adopt(st, c)[j];
-                self.plan_line(st, r)
-            }
-            Step::Move(k) => {
-                let (ch, at, cards) = self.declarer_moves(&st, &s)[k];
-                let then = self.plan_line(ch, req);
-                Self::declarer_step(at, cards, then)
-            }
-            Step::Branch => {
-                let mut branches = Vec::new();
-                let mut ruff = None;
-                for (card, g, ch, won) in self.defender_moves(&st, &s, c) {
-                    let map = self.map(&st, &ch);
-                    let sub_req = Self::pass(&req, g, &map, won);
-                    let sub = if self.line(ch, sub_req) == Tricks::ZERO {
-                        Plan::Hopeless
-                    } else {
-                        self.plan_line(ch, sub_req)
-                    };
-                    Self::add_branch(&mut branches, &mut ruff, &s, card, sub);
-                }
-                Plan::Defender {
-                    seat: seat((st.leader + st.played) % 4),
-                    branches,
-                    ruff,
-                }
-            }
-        }
     }
 }
 

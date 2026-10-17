@@ -566,9 +566,7 @@ fn name(north: Holding, south: Holding) -> String {
 
 /// Disagreements between the engine and the oracle, and how many numbers
 /// were compared.  Every trick target and exact expected tricks must match
-/// exactly, overall and per opening card; the fast expected-tricks line must
-/// not beat the exact value (overall or per lead) and its bound must be the
-/// sum of the targets.
+/// exactly, overall and per opening card.
 fn compare(north: Holding, south: Holding, c: Constraints, o: &Solved) -> (Vec<String>, usize) {
     let mut fails = Vec::new();
     let mut checks = 0;
@@ -577,28 +575,15 @@ fn compare(north: Holding, south: Holding, c: Constraints, o: &Solved) -> (Vec<S
     let d = c.discards;
     let longer = ((north - d).len().max((south - d).len()) as u8).min(c.rounds);
     // Only trick targets take constraints
-    let ev = if c == Constraints::default() {
-        &[(Goal::ExactExpected, None), (Goal::Expected, None)][..]
-    } else {
-        &[]
-    };
+    let ev = c == Constraints::default();
     let goals = (1..=longer)
         .map(|target| (Goal::Tricks { target }, Some(target)))
-        .chain(ev.iter().copied());
+        .chain(ev.then_some((Goal::ExactExpected, None)));
     for (goal, target) in goals {
         let a = solver.analyze(goal).unwrap();
         let want = o.best(target);
         checks += 1;
-        if goal == Goal::Expected {
-            let targets: u64 = (1..=longer).map(|k| o.best(Some(k))).sum();
-            checks += 1;
-            if !(a.score <= want && want <= a.bound && a.bound == targets) {
-                fails.push(format!(
-                    "{name} Expected: line {} bound {} vs oracle exact {want}, targets {targets}",
-                    a.score, a.bound
-                ));
-            }
-        } else if a.score != want {
+        if a.score != want {
             fails.push(format!("{name} {goal:?}: engine {} oracle {want}", a.score));
         }
         let cards: usize = a.leads.iter().map(|l| l.cards.len()).sum();
@@ -619,7 +604,7 @@ fn compare(north: Holding, south: Holding, c: Constraints, o: &Solved) -> (Vec<S
                 .iter()
                 .find(|l| seat_index(l.seat) == *seat && l.cards.contains(card))
             {
-                Some(l) if l.score == want || (goal == Goal::Expected && l.score <= want) => {}
+                Some(l) if l.score == want => {}
                 Some(l) => fails.push(format!(
                     "{name} {goal:?} lead {card}: engine {} oracle {want}",
                     l.score
@@ -997,7 +982,7 @@ fn interrupted_bound_is_double_dummy() {
         }
         let goals = (1..=max)
             .map(|target| Goal::Tricks { target })
-            .chain([Goal::Expected, Goal::ExactExpected]);
+            .chain([Goal::ExactExpected]);
         for goal in goals {
             let want: u64 = match goal {
                 Goal::Tricks { target } => deals[usize::from(target)..].iter().sum(),

@@ -15,14 +15,10 @@ wrong whenever a falsecard spreads one layout over several branches).
 Layouts are weighted by vacant places, so every probability is an exact
 fraction over C(26, 13).
 
-The most tricks on average come two ways.  `Goal::Expected` combines the
-targets' optimal lines: it follows one of them, and where it is made or
-hopeless adopts whichever target's line from there scores best.  It is fast
-and comes with a bound, the sum of the targets' success probabilities, that
-no line can beat.  On 600 random combinations the line was the best on 95%,
-proven so by the bound on 81%, and at worst 0.06 tricks short.
-`Goal::ExactExpected` searches the full "tricks per layout" vectors instead,
-which is exact but can take seconds.
+The most tricks on average (`Goal::ExactExpected`) is a game of its own: the
+defence minimizes tricks, not one target's chances, so its line is no
+combination of the targets' lines.  It searches the full "tricks per
+layout" vectors, which can take seconds.
 
 Assumptions, as in Pavlicek's card-combination tables: unlimited entries to
 both hands, no ruffs, no inference about the enemy hands, only tricks in this
@@ -45,7 +41,7 @@ let a = analyze(north, south, Goal::Tricks { target: 3 }).unwrap();
 println!("{:.1}%\n{}", a.value() * 100.0, a.plan); // 77.1%, then the line
 ```
 
-`analyze_all` solves every target and `Goal::Expected` in one pass.
+`analyze_all` solves every target and `Goal::ExactExpected` in one pass.
 `Solver` keeps the memo across goals, and `Game` plays the suit out on it
 trick by trick: `moves` scores each card declarer may play now, and `play`
 plays one and lets the engine's defenders answer.  The `serde` feature derives
@@ -73,12 +69,6 @@ ranges such as `-,-1` (West at most one card) or `-,1-2`, `--first N|S`
 and `--entries NORTH,SOUTH` such as `-,1` (`-` for unlimited), `--rounds N`,
 `--lead CARD`, `--discard CARDS` and `--ruffs N,E,S,W`.
 
-Every `Analysis` says whether it is `proven`: its `score` equals its `bound`,
-so no line does better.  Only a `Goal::Expected` line can fall short; the
-best then lies in `score..=bound`, and each `Lead` carries its own `bound`
-for the lines starting with it (the global bound does not certify the other
-leads).
-
 A search can be given a budget.  `Solver::set_interrupt` takes a callback
 that is polled every 1024 or so states searched, with the number of states
 memoized; once it returns `true`, `analyze` fails with
@@ -99,7 +89,7 @@ let deadline = Instant::now() + Duration::from_secs(1);
 solver.set_interrupt(move |_states| Instant::now() >= deadline);
 match solver.analyze(Goal::Tricks { target: 2 }) {
     Ok(a) => println!("{:.1}%", a.value() * 100.0),
-    Err(Error::Interrupted { bound }) => println!("at most {bound} of 10400600"),
+    Err(Error::Interrupted { bound, .. }) => println!("at most {bound} of 10400600"),
     Err(e) => panic!("{e}"),
 }
 ```
@@ -111,13 +101,12 @@ the thread or worker for a hard stop.
 ```sh
 cargo run --release --example solve -- AJ52 K76      # all goals
 cargo run --release --example solve -- AQ3 42 2      # one target
-cargo run --release --example solve -- A943 QT2 ev     # expected tricks
-cargo run --release --example solve -- A943 QT2 exact  # ... by the exact search
+cargo run --release --example solve -- A943 QT2 ev    # expected tricks
 cargo run --release --example solve -- KQ85 T73 --budget 1  # each goal 1 s
 ```
 
-The CLI prints each goal as `proven`, as `best <= x` when the line found is
-not proven best, or as `interrupted (best <= x)` when the budget ran out.
+The CLI prints each goal's value, or `interrupted (best <= x)` when the
+budget ran out.
 Bad holdings and unsupported problems (more than 256 layouts) exit with
 status 2 and a message.
 
@@ -128,9 +117,9 @@ with their sources; [`tests/fixtures.rs`](tests/fixtures.rs) checks them and
 replays every returned plan on every layout against every legal defence.
 [`examples/bench.rs`](examples/bench.rs) runs the seeded corpus in
 [`tests/fixtures/corpus.txt`](tests/fixtures/corpus.txt), one process per
-goal with the timeout as its budget, and reports timings, memory, proof
-rates and how each run ended (`proven`, `bounded`, `interrupted` with its
-bound, or `timeout` when killed at twice the budget):
+goal with the timeout as its budget, and reports timings, memory and how
+each run ended (`proven`, `interrupted` with its bound, or `timeout` when
+killed at twice the budget):
 
 ```sh
 cargo run --release --example bench -- run tests/fixtures/corpus.txt 30 > bench.tsv
@@ -143,15 +132,13 @@ worth thinking about, and plays the suit out against you.  Every card you
 choose is graded against the best play from the same information; the
 defenders hold a random layout (vacant-places odds) and answer with the card
 that hurts most on it, breaking ties by the most deceptive one.  At the end it
-shows every lead's value and the line.  For expected tricks it runs the
-exact search only when the bound does not already prove the combined line
-best, and keeps that line, marked as such, if the exact search runs out of
-time.
+shows every lead's value and the line.  The line need not play every card
+the trainer grades best: it keeps what the optimum needs over every layout,
+while a falsecarding defender may make a different card best from here.
 
-Every goal shows its status as it arrives: proven, best found (with the bound
-no line beats), or interrupted (with that bound only); nothing unproven is
-called best or optimal.  The worker answers in slices of 300 ms
-(`Trainer::set_budget`, `Trainer::target(k)`, `Trainer::expected(exact)`;
+Every goal shows its value as it arrives, or interrupted with the bound no
+line beats.  The worker answers in slices of 300 ms
+(`Trainer::set_budget`, `Trainer::target(k)`, `Trainer::expected()`;
 an interrupted call returns `{interrupted: true, bound}` and keeps its memo),
 so a combination you enter solves the goal you ask for first, then the
 others, showing the time spent meanwhile.  Play starts once your goal is done
@@ -181,9 +168,9 @@ antichains small.  Only the best vector counts in the end, so a narrow
 search first finds a good line, and the exact search then drops every
 vector that already loses more deals than that line.  The hardest
 combinations known, such as `KQ85` opposite `T73` and `KJ9753` opposite a
-void, take under a second per target, and `Goal::Expected` adds a second or
-two at most.  `Goal::ExactExpected` needs the full vectors: about a second
-on those, but about fifteen seconds on `KJ9753` opposite a void.  The web
+void, take under a second per target.  `Goal::ExactExpected` needs the
+full vectors: about a second on those, but about fifteen seconds on
+`KJ9753` opposite a void, where the trainer shows only a bound.  The web
 trainer runs the solver in a worker, so
 the page stays responsive; a random deal is abandoned after two seconds and
 another dealt, and a combination you enter yourself searches ten seconds at a

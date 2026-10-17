@@ -7,14 +7,13 @@
 //!
 //! `gen` samples one combination per stratum (missing cards 4..=12, North's
 //! length, missing honours among AKQJ), then appends the known slow cases.
-//! `run` solves every combination for each trick target, the fast expected
-//! line (`ev`) and the exact search (`exact`), one process per run so a
-//! timeout or crash costs only that run.  Each run gets the timeout as its
-//! engine budget, and is killed at twice that.  Rows go to stdout as TSV,
-//! with `proof` saying how each run ended: `proven`, `bounded` (an `ev` line
-//! short of its bound), `interrupted` (out of budget; `bound` still holds),
-//! `timeout` (killed) or `error`.  The summary (p50/p95/max time of finished
-//! runs, proof counts, EV gap, memory) goes to stderr.
+//! `run` solves every combination for each trick target and expected tricks
+//! (`ev`), one process per run so a timeout or crash costs only that run.
+//! Each run gets the timeout as its engine budget, and is killed at twice
+//! that.  Rows go to stdout as TSV, with `proof` saying how each run ended:
+//! `proven`, `interrupted` (out of budget; `bound` still holds), `timeout`
+//! (killed) or `error`.  The summary (p50/p95/max time of finished runs,
+//! proof counts, memory) goes to stderr.
 
 use contract_bridge::Holding;
 use std::io::Read;
@@ -87,7 +86,7 @@ fn generate(seed: u64) {
 fn goals(north: Holding, south: Holding) -> Vec<String> {
     (1..=north.len().max(south.len()))
         .map(|t| format!("t{t}"))
-        .chain(["ev".into(), "exact".into()])
+        .chain(["ev".into()])
         .collect()
 }
 
@@ -95,8 +94,7 @@ fn goals(north: Holding, south: Holding) -> Vec<String> {
 /// vmhwm_kb proof`
 fn one(north: Holding, south: Holding, goal: &str, budget: Option<Duration>) {
     let goal = match goal {
-        "ev" => Goal::Expected,
-        "exact" => Goal::ExactExpected,
+        "ev" => Goal::ExactExpected,
         t => Goal::Tricks {
             target: t[1..].parse().expect("target"),
         },
@@ -107,11 +105,7 @@ fn one(north: Holding, south: Holding, goal: &str, budget: Option<Duration>) {
         solver.set_interrupt(move |_| start.elapsed() >= budget);
     }
     let (score, bound, proof) = match solver.analyze(goal) {
-        Ok(a) => (
-            a.score,
-            a.bound,
-            if a.proven { "proven" } else { "bounded" },
-        ),
+        Ok(a) => (a.score, a.score, "proven"),
         Err(Error::Interrupted { bound, .. }) => (0, bound, "interrupted"),
         Err(e) => panic!("{e}"),
     };
@@ -134,7 +128,7 @@ struct Row {
     goal: String,
     /// ok, interrupted, timeout or error
     status: String,
-    /// proven, bounded, interrupted, timeout or error
+    /// proven, interrupted, timeout or error
     proof: String,
     score: u64,
     bound: u64,
@@ -242,16 +236,6 @@ fn run(corpus: &str, timeout: Duration) {
     times.sort_by(f64::total_cmp);
     let count = |status: &str| rows.iter().filter(|r| r.status == status).count();
     let proof = |p: &str| rows.iter().filter(|r| r.proof == p).count();
-    let ev: Vec<&Row> = rows.iter().filter(|r| r.goal == "ev" && r.status == "ok").collect();
-    let proven = ev.iter().filter(|r| r.score == r.bound).count();
-    let gaps: Vec<f64> = ev
-        .iter()
-        .filter_map(|e| {
-            rows.iter()
-                .find(|r| r.goal == "exact" && r.status == "ok" && r.north == e.north && r.south == e.south)
-                .map(|x| (x.score as f64 - e.score as f64) / TOTAL as f64)
-        })
-        .collect();
     let slow: Vec<String> = rows
         .iter()
         .filter(|r| r.status != "ok" || r.ms > 1000.0)
@@ -266,12 +250,10 @@ fn run(corpus: &str, timeout: Duration) {
         .collect();
     eprintln!(
         "runs {} ok {} interrupted {} timeout {} error {}\n\
-         proof: proven {} bounded {} interrupted {} timeout {} error {}\n\
+         proof: proven {} interrupted {} timeout {} error {}\n\
          time ms p50 {:.1} p95 {:.1} max {:.1}\n\
          peak memory MB {:.0}\n\
          states max {} widest antichain {}\n\
-         ev proven {proven}/{} ({:.1}%)\n\
-         ev gap (exact - line) over {} pairs: mean {:.4} max {:.4}\n\
          slow or failed:\n  {}",
         rows.len(),
         count("ok"),
@@ -279,7 +261,6 @@ fn run(corpus: &str, timeout: Duration) {
         count("timeout"),
         count("error"),
         proof("proven"),
-        proof("bounded"),
         proof("interrupted"),
         proof("timeout"),
         proof("error"),
@@ -289,11 +270,6 @@ fn run(corpus: &str, timeout: Duration) {
         rows.iter().map(|r| r.hwm_kb).max().unwrap_or(0) as f64 / 1024.0,
         rows.iter().map(|r| r.states).max().unwrap_or(0),
         rows.iter().map(|r| r.widest).max().unwrap_or(0),
-        ev.len(),
-        100.0 * proven as f64 / ev.len().max(1) as f64,
-        gaps.len(),
-        gaps.iter().sum::<f64>() / gaps.len().max(1) as f64,
-        gaps.iter().cloned().fold(0.0, f64::max),
         slow.join("\n  ")
     );
 }

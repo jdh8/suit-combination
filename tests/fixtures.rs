@@ -335,15 +335,6 @@ fn reference_cases() {
                 fail(format!("lead {lead} is optimal but should be avoided"));
             }
         }
-        if goal == Goal::ExactExpected {
-            let line = solver.analyze(Goal::Expected).unwrap();
-            if !(line.score <= a.score && a.score <= line.bound) {
-                fail(format!(
-                    "fast line {} / bound {} do not bracket {}",
-                    line.score, line.bound, a.score
-                ));
-            }
-        }
     }
     assert!(failures.is_empty(), "\n{}", failures.join("\n"));
 }
@@ -352,11 +343,7 @@ fn reference_cases() {
 /// analysis claims
 fn check_plans(north: Holding, south: Holding, c: Constraints) {
     let mut solver = Solver::with_constraints(north, south, c).unwrap();
-    let mut analyses = solver.analyze_all().unwrap();
-    if c == Constraints::default() {
-        analyses.push(solver.analyze(Goal::ExactExpected).unwrap());
-    }
-    for a in &analyses {
+    for a in &solver.analyze_all().unwrap() {
         let name = format!("{north} / {south} {:?} {c:?}", a.goal);
         assert_eq!(evaluate(a, &c), a.score, "{name}");
     }

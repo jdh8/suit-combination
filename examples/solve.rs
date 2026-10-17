@@ -1,4 +1,4 @@
-//! `cargo run --release --example solve -- AJ52 K76 [TARGET|ev|exact] [--budget SECS]
+//! `cargo run --release --example solve -- AJ52 K76 [TARGET|ev] [--budget SECS]
 //! [--vacant EAST,WEST] [--east CARDS] [--west CARDS] [--length EAST,WEST]
 //! [--hcp EAST,WEST] [--first N|S] [--entries NORTH,SOUTH] [--rounds N]
 //! [--lead CARD] [--discard CARDS] [--ruffs N,E,S,W]`
@@ -36,7 +36,7 @@ fn holding(seat: &str, s: &str) -> Holding {
     })
 }
 
-const USAGE: &str = "usage: solve NORTH SOUTH [TARGET|ev|exact] [--budget SECS] \
+const USAGE: &str = "usage: solve NORTH SOUTH [TARGET|ev] [--budget SECS] \
     [--vacant EAST,WEST] [--east CARDS] [--west CARDS] [--length EAST,WEST] [--hcp EAST,WEST] \
     [--first N|S] [--entries NORTH,SOUTH] [--rounds N] [--lead CARD] [--discard CARDS] \
     [--ruffs N,E,S,W]";
@@ -147,14 +147,13 @@ fn main() {
     let total = solver.total();
     let max = north.len().max(south.len()) as u8;
     let goals = match rest {
-        [t] if t == "ev" => vec![Goal::Expected],
-        [t] if t == "exact" => vec![Goal::ExactExpected],
+        [t] if t == "ev" => vec![Goal::ExactExpected],
         [t] => vec![Goal::Tricks {
             target: t.parse().unwrap_or_else(|_| fail(format!("target: {t}?"))),
         }],
         [] => (1..=max)
             .map(|target| Goal::Tricks { target })
-            .chain((constraints == Constraints::default()).then_some(Goal::Expected))
+            .chain((constraints == Constraints::default()).then_some(Goal::ExactExpected))
             .collect(),
         _ => fail(USAGE),
     };
@@ -184,13 +183,7 @@ fn main() {
     println!("{north} opposite {south}");
     for (goal, r) in &results {
         match r {
-            Ok(a) if a.proven => println!("{}: {} proven", name(*goal), value(*goal, a.score)),
-            Ok(a) => println!(
-                "{}: {}, best <= {}",
-                name(*goal),
-                value(*goal, a.score),
-                value(*goal, a.bound)
-            ),
+            Ok(a) => println!("{}: {}", name(*goal), value(*goal, a.score)),
             Err(Error::Interrupted { bound, .. }) => {
                 println!(
                     "{}: interrupted (best <= {})",
@@ -210,13 +203,8 @@ fn main() {
     {
         println!("\nLine for {}: {}", name(a.goal), value(a.goal, a.score));
         for l in &a.leads {
-            let bound = if l.bound > l.score {
-                format!(" (best after it <= {})", value(a.goal, l.bound))
-            } else {
-                String::new()
-            };
             println!(
-                "  lead {} from {:?}: {}{bound}",
+                "  lead {} from {:?}: {}",
                 l.cards,
                 l.seat,
                 value(a.goal, l.score)
