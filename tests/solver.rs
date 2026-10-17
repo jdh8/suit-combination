@@ -285,6 +285,7 @@ fn constraint_errors() {
         let c = Constraints {
             vacant,
             known: [h(east), h(west)],
+            ..Constraints::default()
         };
         Solver::with_constraints(h("AQ2"), h("543"), c)
     };

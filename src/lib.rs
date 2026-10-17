@@ -7,8 +7,9 @@
 //! average.  Layouts are weighted by vacant places: one giving West `w` of
 //! the `n` missing cards has weight `C(26 - n, 13 - w)` out of
 //! <code>[TOTAL] = C(26, 13)</code>.  [`Constraints`] set other vacant
-//! places and cards known to be with East or West; scores are then out of
-//! [`Analysis::total`].
+//! places, cards known to be with East or West, and ranges of each
+//! defender's length and high-card points in the suit; scores are then out
+//! of [`Analysis::total`].
 //!
 //! The search is exact.  Instead of a greedy per-branch value — which is *not*
 //! optimal here, because a falsecarding defender spreads one layout's weight
@@ -38,7 +39,8 @@
 //! and classes merge as the declarer cards separating them are played.
 //!
 //! A card known to be with one defender is a class of its own: declarer can
-//! tell it from its neighbours.
+//! tell it from its neighbours.  So is each missing honour once HCP are
+//! constrained, as which honours a defender holds is no longer symmetric.
 //!
 //! Assumptions (the usual ones, as in Pavlicek's card-combination tables):
 //! unlimited entries to both hands, no ruffs, no inference about the enemy
@@ -200,6 +202,11 @@ pub struct Constraints {
     pub vacant: [u8; 2],
     /// Cards of the suit known to be with East, West
     pub known: [Holding; 2],
+    /// Fewest and most cards of the suit East, West hold
+    pub length: [[u8; 2]; 2],
+    /// Fewest and most high-card points (A 4, K 3, Q 2, J 1) East, West hold
+    /// in this suit; the other suits are not modelled
+    pub hcp: [[u8; 2]; 2],
 }
 
 impl Default for Constraints {
@@ -207,6 +214,44 @@ impl Default for Constraints {
         Self {
             vacant: [13; 2],
             known: [Holding::EMPTY; 2],
+            length: [[0, 13]; 2],
+            hcp: [[0, 10]; 2],
+        }
+    }
+}
+
+/// High-card points of the cards in `mask`
+fn points(mask: u16) -> u8 {
+    (11..15).map(|r| (mask >> r & 1) as u8 * (r - 10)).sum()
+}
+
+impl Constraints {
+    /// Honours count apart, so each is a class of its own
+    fn splits_honours(&self) -> bool {
+        self.hcp != Self::default().hcp
+    }
+
+    /// Deals of layout `i` of `classes`, the `missing` cards, per way to
+    /// hold its classes' cards: 0 if a length or HCP is out of range, else
+    /// the [`vacancy`]
+    fn prior(&self, missing: u16, classes: &[Class], i: usize) -> u64 {
+        let count = |c: &Class| (i / c.stride % (usize::from(c.size) + 1)) as u8;
+        let n = missing.count_ones() as u8;
+        let w: u8 = classes.iter().map(count).sum();
+        let west: u8 = classes
+            .iter()
+            .filter(|&c| count(c) > 0)
+            .map(|c| points(c.ranks))
+            .sum();
+        let within = |[lo, hi]: [u8; 2], x| (lo..=hi).contains(&x);
+        let fits = within(self.length[0], n - w)
+            && within(self.length[1], w)
+            && (!self.splits_honours()
+                || within(self.hcp[0], points(missing) - west) && within(self.hcp[1], west));
+        if fits {
+            vacancy(self.vacant, n.into(), w.into())
+        } else {
+            0
         }
     }
 }
@@ -574,8 +619,12 @@ fn vacancy(vacant: [u8; 2], n: u64, w: u64) -> u64 {
 
 impl Structure {
     fn new(missing: u16, live: u16, c: &Constraints) -> Self {
-        let n = missing.count_ones() as u64;
         let [east, west] = c.known.map(Holding::to_bits);
+        let honours = if c.splits_honours() {
+            missing & 0xF << 11
+        } else {
+            0
+        };
         let mut classes: Vec<Class> = Vec::new();
         let mut len = 1;
         let mut push = |ranks: u16| {
@@ -590,7 +639,7 @@ impl Structure {
         let mut cur = 0u16;
         for r in 2..16u8 {
             let bit = 1 << r;
-            if r < 15 && (east | west) & bit != 0 {
+            if r < 15 && (east | west | honours) & bit != 0 {
                 if cur != 0 {
                     push(cur);
                     cur = 0;
@@ -613,12 +662,11 @@ impl Structure {
                 if !classes.iter().all(|c| fits(i, c)) {
                     return 0;
                 }
-                let w: usize = classes.iter().map(|c| count(i, c)).sum();
                 classes
                     .iter()
                     .map(|c| binom(c.size.into(), count(i, c) as u64))
                     .product::<u64>()
-                    * vacancy(c.vacant, n, w as u64)
+                    * c.prior(missing, &classes, i)
             })
             .collect();
         let ge = std::array::from_fn(|d| {
@@ -1583,18 +1631,15 @@ impl Solver {
     /// So a vector losing more deals here than a known line loses at the
     /// root can be dropped: nothing built on it beats that line.
     fn post(&self, st: &State, s: &Structure) -> Vec<u64> {
-        let n = u64::from(self.missing.count_ones());
         let mut w = vec![0; s.len];
         for i in Self::consistent(st, s).iter() {
-            let mut west = 0;
             let mut deals = 1;
             for (k, class) in s.classes.iter().enumerate() {
                 let held = (i / class.stride % (usize::from(class.size) + 1)) as u64;
                 let (sw, se) = (u64::from(st.shown[1][k]), u64::from(st.shown[0][k]));
-                west += held;
                 deals *= binom(u64::from(class.size) - sw - se, held - sw);
             }
-            w[i] = deals * vacancy(self.constraints.vacant, n, west);
+            w[i] = deals * self.constraints.prior(self.missing, &s.classes, i);
         }
         w
     }

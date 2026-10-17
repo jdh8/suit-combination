@@ -1,11 +1,14 @@
 //! `cargo run --release --example solve -- AJ52 K76 [TARGET|ev|exact] [--budget SECS]
-//! [--vacant EAST,WEST] [--east CARDS] [--west CARDS]`
+//! [--vacant EAST,WEST] [--east CARDS] [--west CARDS] [--length EAST,WEST]
+//! [--hcp EAST,WEST]`
 //!
 //! Prints the value of every goal (or just the one given) with its status,
 //! and the line for the goal shown last.  `--budget` gives each goal at most
 //! that many seconds; a goal out of time shows only its bound.  `--vacant`
 //! sets the defenders' vacant places, `--east` and `--west` the cards known
-//! to be with them; only trick targets take these.
+//! to be with them, `--length` and `--hcp` (this suit only) ranges such as
+//! `3`, `2-4`, `-2`, `3-` or `-` for any, e.g. `--length -,-1`; only trick
+//! targets take these.
 
 use contract_bridge::Holding;
 use std::time::{Duration, Instant};
@@ -28,7 +31,7 @@ fn holding(seat: &str, s: &str) -> Holding {
 }
 
 const USAGE: &str = "usage: solve NORTH SOUTH [TARGET|ev|exact] [--budget SECS] \
-    [--vacant EAST,WEST] [--east CARDS] [--west CARDS]";
+    [--vacant EAST,WEST] [--east CARDS] [--west CARDS] [--length EAST,WEST] [--hcp EAST,WEST]";
 
 /// Removes `--flag VALUE` from `args`, returning the value
 fn flag(args: &mut Vec<String>, name: &str) -> Option<String> {
@@ -37,6 +40,30 @@ fn flag(args: &mut Vec<String>, name: &str) -> Option<String> {
         fail(format!("{name}: value expected"));
     }
     Some(args.drain(i..i + 2).nth(1).unwrap())
+}
+
+/// `EAST,WEST` ranges for `name`, each `LO-HI` with either end left out
+/// for `default`'s, or one number
+fn ranges(name: &str, value: &str, default: [u8; 2]) -> [[u8; 2]; 2] {
+    let side = |s: &str| -> Option<[u8; 2]> {
+        let end = |e: &str, d| {
+            if e.is_empty() {
+                Some(d)
+            } else {
+                e.parse().ok()
+            }
+        };
+        match s.split_once('-') {
+            Some((lo, hi)) => Some([end(lo, default[0])?, end(hi, default[1])?]),
+            None if s.is_empty() => Some(default),
+            None => s.parse().ok().map(|n| [n, n]),
+        }
+    };
+    let sides: Option<Vec<_>> = value.split(',').map(side).collect();
+    match sides.as_deref() {
+        Some(&[east, west]) => [east, west],
+        _ => fail(format!("{name}: EAST,WEST ranges expected, e.g. -,2-4")),
+    }
 }
 
 fn main() {
@@ -57,6 +84,13 @@ fn main() {
         if let Some(cards) = flag(&mut args, name) {
             constraints.known[i] = holding(&name[2..], &cards);
         }
+    }
+    let d = Constraints::default();
+    if let Some(v) = flag(&mut args, "--length") {
+        constraints.length = ranges("--length", &v, d.length[0]);
+    }
+    if let Some(v) = flag(&mut args, "--hcp") {
+        constraints.hcp = ranges("--hcp", &v, d.hcp[0]);
     }
     let [north, south, rest @ ..] = args.as_slice() else {
         fail(USAGE);

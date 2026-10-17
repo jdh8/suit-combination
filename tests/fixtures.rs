@@ -24,6 +24,10 @@ struct Case {
     /// Cards known to be with East, West
     east: Option<String>,
     west: Option<String>,
+    /// Fewest and most cards of East, West
+    length: Option<[[u8; 2]; 2]>,
+    /// Fewest and most HCP of East, West in this suit
+    hcp: Option<[[u8; 2]; 2]>,
     score: Option<u64>,
     /// The constrained denominator; [`TOTAL`] if absent
     total: Option<u64>,
@@ -46,9 +50,12 @@ fn cases() -> Vec<Case> {
 impl Case {
     fn constraints(&self) -> Constraints {
         let known = |h: &Option<String>| h.as_deref().map_or(Holding::EMPTY, holding);
+        let d = Constraints::default();
         Constraints {
-            vacant: self.vacant.unwrap_or([13; 2]),
+            vacant: self.vacant.unwrap_or(d.vacant),
             known: [known(&self.east), known(&self.west)],
+            length: self.length.unwrap_or(d.length),
+            hcp: self.hcp.unwrap_or(d.hcp),
         }
     }
 }
@@ -137,9 +144,9 @@ fn follow(plan: &Plan, mut p: Pos) -> u8 {
 }
 
 /// Deals in which West holds exactly `west` of the `missing` cards under
-/// `c`: none unless the known cards are where `c` puts them, else the ways
-/// West's other vacant places take the defenders' unknown cards of other
-/// suits
+/// `c`: none unless the known cards are where `c` puts them and the
+/// lengths and HCP are in range, else the ways West's other vacant places
+/// take the defenders' unknown cards of other suits
 fn weight(missing: u16, west: u16, c: &Constraints) -> u64 {
     let [east_known, west_known] = c.known.map(Holding::to_bits);
     if west & west_known != west_known || west & east_known != 0 {
@@ -147,6 +154,12 @@ fn weight(missing: u16, west: u16, c: &Constraints) -> u64 {
     }
     let n = u64::from(missing.count_ones());
     let w = u64::from(west.count_ones());
+    let hcp = |m: u16| (11..15).filter(|&r| m >> r & 1 != 0).map(|r| r - 10).sum::<u64>();
+    let held = [[n - w, w], [hcp(missing & !west), hcp(west)]];
+    let within = |[lo, hi]: [u8; 2], x: u64| (u64::from(lo)..=u64::from(hi)).contains(&x);
+    if (0..2).any(|d| !within(c.length[d], held[0][d]) || !within(c.hcp[d], held[1][d])) {
+        return 0;
+    }
     let [east, west] = c.vacant.map(u64::from);
     if w > west || n - w > east {
         return 0;

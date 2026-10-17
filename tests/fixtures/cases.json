@@ -220,5 +220,20 @@
     "north": "AKT98", "south": "5432", "goal": 5, "east": "Q", "score": 2116296, "total": 5200300,
     "source": "Hand derivation: the Q known with East; A then K drops West's J from Jx and East's J from QJ, every 2-2 split: 3 C(22, 11) of C(25, 13) deals; the finesse (West J76, J7, J6) gets C(22, 10) + 2 C(22, 11) = 2057510",
     "checked": "2026-10-18", "note": "A known card splits the QJ class: East's Q tells nothing, so no restricted choice, and the drop wins"
+  },
+  {
+    "north": "AKJ98", "south": "76543", "goal": 5, "length": [[0, 13], [0, 1]], "score": 4056234, "total": 5200300,
+    "source": "Hand derivation: West holds at most one card; A then K drops West's singleton (Q, T or 2) or East's Qx, while East's QT2 sits over nothing: 3 C(23, 12) of C(23, 13) + 3 C(23, 12) deals",
+    "checked": "2026-10-18"
+  },
+  {
+    "north": "AQ2", "south": "543", "goal": 2, "hcp": [[0, 10], [0, 2]], "score": 503880, "total": 5200300,
+    "source": "Hand derivation: at most 2 HCP in the suit leaves West without the K (the J alone is 1), the same layouts as the K known with East: C(19, 7) + 6 C(19, 8) of C(25, 13) deals",
+    "checked": "2026-10-18"
+  },
+  {
+    "north": "AKT98", "south": "5432", "goal": 5, "hcp": [[0, 10], [1, 2]], "score": 4115020, "total": 5408312,
+    "source": "Hand derivation: 1-2 HCP gives West exactly one of Q, J. The A, then the finesse if East dropped an honour, else the K, wins every 2-2 (2 x 2 C(22, 11)) and East's singleton honour (2 C(22, 10)); West's singleton honour opposite East's H76 always takes a trick. Total 2 (C(22, 12) + 2 C(22, 11) + C(22, 10))",
+    "checked": "2026-10-18", "note": "HCP no known card can express: the honours split one each, either way"
   }
 ]

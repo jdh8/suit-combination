@@ -207,8 +207,18 @@ when a known Q makes East's Q tell nothing), the policy evaluator under the
 same constraints, and the oracle with its own weights on 200 random
 constrained combinations. Defaults are byte-identical to before on 3,000
 combinations and 400 in exact mode. Expected tricks return
-`Error::Unsupported` when constrained. Not yet: length and HCP
-restrictions, the wasm and UI surfaces (phase 5).
+`Error::Unsupported` when constrained.
+
+Length and HCP ranges per defender are in too (`Constraints::length`,
+`Constraints::hcp`, CLI `--length`/`--hcp`). HCP means this suit only, a
+filter on layouts, not whole-hand modelling. Once HCP are constrained every
+missing honour is a class of its own, since which honours a defender holds
+stops being symmetric. Checked by three hand-derived fixtures (one HCP range
+no known card can express: West holds exactly one of Q, J), the evaluator,
+and the oracle sweep, now with random length and HCP ranges; the sweep fails
+with honour splitting or the length filter removed. Defaults byte-identical
+again on 3,000 combinations and 400 exact. Not yet: the wasm and UI
+surfaces (phase 5).
 
 **Done:** each option matches independent target examples; defaults
 reproduce phase 1; `AQ / 2` solves; unsupported option combinations,

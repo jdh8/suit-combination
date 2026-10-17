@@ -108,6 +108,14 @@ fn constrained(missing: u16, west: u16, c: Constraints) -> u64 {
     if w > west_places || n - w > east_places {
         return 0;
     }
+    // Points of the jack up, by hand rather than the engine's helper
+    let hcp = |m: u16| (1..=4).filter(|&p| m >> (10 + p) & 1 != 0).sum::<u32>();
+    let length = [n - w, w];
+    let points = [hcp(missing & !west), hcp(west)];
+    let within = |[lo, hi]: [u8; 2], x: u32| u32::from(lo) <= x && x <= u32::from(hi);
+    if (0..2).any(|d| !within(c.length[d], length[d]) || !within(c.hcp[d], points[d])) {
+        return 0;
+    }
     let unknown = east_places + west_places - n;
     binom(unknown.into(), (west_places - w).into())
 }
@@ -669,8 +677,9 @@ fn oracle_agrees_on_random_small_combinations() {
     );
 }
 
-/// Random vacant places from 4 to 13 and, for each missing card, one chance
-/// in three that it is known to be with East or West, seeded by the
+/// Random vacant places from 4 to 13; for each missing card, one chance in
+/// three that it is known to be with East or West; even chances of a random
+/// length range and of a random HCP range for one defender; seeded by the
 /// combination; sometimes no layout fits
 fn random_constraints(north: Holding, south: Holding) -> Constraints {
     let mut x = u64::from(north.to_bits()) << 16 | u64::from(south.to_bits()) | 1 << 40;
@@ -688,10 +697,28 @@ fn random_constraints(north: Holding, south: Holding) -> Constraints {
             _ => {}
         }
     }
-    Constraints {
-        vacant: [4 + (rand() % 10) as u8, 4 + (rand() % 10) as u8],
+    let vacant = [4 + (rand() % 10) as u8, 4 + (rand() % 10) as u8];
+    let missing = DECK & !north.to_bits() & !south.to_bits();
+    let mut c = Constraints {
+        vacant,
         known: known.map(Holding::from_bits_truncate),
+        ..Constraints::default()
+    };
+    let hcp = (11..15)
+        .filter(|&r| missing >> r & 1 != 0)
+        .map(|r| r - 10)
+        .sum::<u64>();
+    for (ranges, most) in [
+        (&mut c.length, u64::from(missing.count_ones())),
+        (&mut c.hcp, hcp),
+    ] {
+        if rand() % 2 == 0 {
+            let lo = rand() % (most + 1);
+            let hi = lo + rand() % (most + 1 - lo);
+            ranges[(rand() % 2) as usize] = [lo as u8, hi as u8];
+        }
     }
+    c
 }
 
 #[test]
@@ -732,6 +759,8 @@ fn oracle_agrees_on_reference_cases() {
         vacant: Option<[u8; 2]>,
         east: Option<String>,
         west: Option<String>,
+        length: Option<[[u8; 2]; 2]>,
+        hcp: Option<[[u8; 2]; 2]>,
         score: Option<u64>,
         value: Option<f64>,
         tolerance: Option<f64>,
@@ -743,9 +772,12 @@ fn oracle_agrees_on_reference_cases() {
     let mut fails = Vec::new();
     for c in cases {
         let known = |h: &Option<String>| h.as_deref().map_or(Holding::EMPTY, holding);
+        let d = Constraints::default();
         let constraints = Constraints {
-            vacant: c.vacant.unwrap_or([13; 2]),
+            vacant: c.vacant.unwrap_or(d.vacant),
             known: [known(&c.east), known(&c.west)],
+            length: c.length.unwrap_or(d.length),
+            hcp: c.hcp.unwrap_or(d.hcp),
         };
         let combo = (holding(&c.north), holding(&c.south), constraints);
         if 13 - combo.0.len() - combo.1.len() > 8 {
