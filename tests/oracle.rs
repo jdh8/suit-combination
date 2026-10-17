@@ -25,7 +25,7 @@ use std::collections::HashMap;
 use std::rc::Rc;
 use std::sync::Mutex;
 use std::sync::atomic::{AtomicUsize, Ordering};
-use suit_combination::{Game, Goal, Solver, TOTAL};
+use suit_combination::{Error, Game, Goal, Solver, TOTAL};
 
 /// Seats by index, as the trick goes round
 const NORTH: usize = 0;
@@ -698,6 +698,54 @@ fn oracle_agrees_on_reference_cases() {
     }
     eprintln!("{} combinations", solved.len());
     assert!(fails.is_empty(), "\n{}", fails.join("\n"));
+}
+
+/// Before any target finishes, an interrupted analysis is bounded by
+/// double dummy: on each layout alone, where declarer knows it, the oracle
+/// says how many tricks that is.
+#[test]
+#[cfg_attr(debug_assertions, ignore = "slow unoptimized: run with --release")]
+fn interrupted_bound_is_double_dummy() {
+    let check = |north: Holding, south: Holding| {
+        let missing = DECK & !north.to_bits() & !south.to_bits();
+        let max = north.len().max(south.len()) as u8;
+        // Deals by the tricks declarer takes double dummy
+        let mut deals = vec![0; usize::from(max) + 1];
+        for west in subsets(missing) {
+            let weight = vacant_places(missing, west);
+            let rules = Rules {
+                weight: Box::new(move |w| if w == west { weight } else { 0 }),
+                ..Rules::standard(north, south)
+            };
+            let tricks = Solved::with(north, south, rules).best(None) / weight;
+            deals[tricks as usize] += weight;
+        }
+        let goals = (1..=max)
+            .map(|target| Goal::Tricks { target })
+            .chain([Goal::Expected, Goal::ExactExpected]);
+        for goal in goals {
+            let want: u64 = match goal {
+                Goal::Tricks { target } => deals[usize::from(target)..].iter().sum(),
+                _ => deals.iter().enumerate().map(|(t, &d)| t as u64 * d).sum(),
+            };
+            let mut solver = Solver::new(north, south).unwrap();
+            solver.set_poll_interval(1);
+            solver.set_interrupt(|_| true);
+            match solver.analyze(goal) {
+                Err(Error::Interrupted { bound }) => {
+                    assert_eq!(bound, want, "{} {goal:?}", name(north, south));
+                }
+                // Nothing to search: no line beats double dummy either
+                Ok(a) => assert!(a.score <= want, "{} {goal:?}", name(north, south)),
+                Err(e) => panic!("{e}"),
+            }
+        }
+    };
+    std::thread::scope(|scope| {
+        for (north, south) in random_combos(60, 3, 6, 0x5DEE_CE66_D1CE_4E5B) {
+            scope.spawn(move || check(north, south));
+        }
+    });
 }
 
 /// Values checked by hand, independent of the engine

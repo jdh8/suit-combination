@@ -46,12 +46,53 @@ trick by trick: `moves` scores each card declarer may play now, and `play`
 plays one and lets the engine's defenders answer.  The `serde` feature derives
 `Serialize` for the result types.
 
+Every `Analysis` says whether it is `proven`: its `score` equals its `bound`,
+so no line does better.  Only a `Goal::Expected` line can fall short; the
+best then lies in `score..=bound`, and each `Lead` carries its own `bound`
+for the lines starting with it (the global bound does not certify the other
+leads).
+
+A search can be given a budget.  `Solver::set_interrupt` takes a callback
+that is polled every 1024 or so states searched, with the number of states
+memoized; once it returns `true`, `analyze` fails with
+`Error::Interrupted { bound }`.  No line is known then, but none scores more
+than `bound`: each target's score where its search finished, else what
+declarer would make seeing all four hands (double dummy), summed over targets
+for expected tricks.  The memo keeps only finished work, so asking again on
+the same `Solver` goes on from where it stopped, and gives exactly what an
+uninterrupted search gives.  The library has no clock: the caller's callback
+reads one.  `Game` never polls it.
+
+```rust
+use std::time::{Duration, Instant};
+use suit_combination::{Error, Goal, Solver};
+
+let mut solver = Solver::new("KQ85".parse().unwrap(), "T73".parse().unwrap()).unwrap();
+let deadline = Instant::now() + Duration::from_secs(1);
+solver.set_interrupt(move |_states| Instant::now() >= deadline);
+match solver.analyze(Goal::Tricks { target: 2 }) {
+    Ok(a) => println!("{:.1}%", a.value() * 100.0),
+    Err(Error::Interrupted { bound }) => println!("at most {bound} of 10400600"),
+    Err(e) => panic!("{e}"),
+}
+```
+
+Polls fall between states, so a state whose antichains take seconds to
+combine (the hardest cases below) can overrun a budget by that much; kill
+the thread or worker for a hard stop.
+
 ```sh
 cargo run --release --example solve -- AJ52 K76      # all goals
 cargo run --release --example solve -- AQ3 42 2      # one target
 cargo run --release --example solve -- A943 QT2 ev     # expected tricks
 cargo run --release --example solve -- A943 QT2 exact  # ... by the exact search
+cargo run --release --example solve -- KQ85 T73 --budget 1  # each goal 1 s
 ```
+
+The CLI prints each goal as `proven`, as `best <= x` when the line found is
+not proven best, or as `interrupted (best <= x)` when the budget ran out.
+Bad holdings and unsupported problems (more than 8 cards missing) exit with
+status 2 and a message.
 
 ## Evidence
 
@@ -60,7 +101,9 @@ with their sources; [`tests/fixtures.rs`](tests/fixtures.rs) checks them and
 replays every returned plan on every layout against every legal defence.
 [`examples/bench.rs`](examples/bench.rs) runs the seeded corpus in
 [`tests/fixtures/corpus.txt`](tests/fixtures/corpus.txt), one process per
-goal with a timeout, and reports timings, memory, timeouts and proof rates:
+goal with the timeout as its budget, and reports timings, memory, proof
+rates and how each run ended (`proven`, `bounded`, `interrupted` with its
+bound, or `timeout` when killed at twice the budget):
 
 ```sh
 cargo run --release --example bench -- run tests/fixtures/corpus.txt 30 > bench.tsv
@@ -73,10 +116,26 @@ worth thinking about, and plays the suit out against you.  Every card you
 choose is graded against the best play from the same information; the
 defenders hold a random layout (vacant-places odds) and answer with the card
 that hurts most on it, breaking ties by the most deceptive one.  At the end it
-shows every lead's value and the optimal line.  For expected tricks it runs the
+shows every lead's value and the line.  For expected tricks it runs the
 exact search only when the bound does not already prove the combined line
 best, and keeps that line, marked as such, if the exact search runs out of
 time.
+
+Every goal shows its status as it arrives: proven, best found (with the bound
+no line beats), or interrupted (with that bound only); nothing unproven is
+called best or optimal.  The worker answers in slices of 300 ms
+(`Trainer::set_budget`, `Trainer::target(k)`, `Trainer::expected(exact)`;
+an interrupted call returns `{interrupted: true, bound}` and keeps its memo),
+so a combination you enter solves the goal you ask for first, then the
+others, showing the time spent meanwhile.  Play starts once your goal is done
+and every other goal has had a turn.  A search runs ten seconds at a time;
+"Keep searching" goes on in the same worker from where it stopped.  Cancel stops at once, keeping every
+result so far; if the slice in flight does not end within 100 ms it
+terminates the worker, whose memo is then lost.  A goal whose search fills
+1 GiB of wasm memory stops as "out of memory" and is not tried again; one
+state can still take gigabytes at once (the exact search on `KQ85` opposite
+`T73`), and then the worker crashes and restarts, again keeping every result
+so far, and play goes on with the goal you asked for if it had finished.
 
 ```sh
 cd web && wasm-pack build --release --target web && python3 -m http.server 8765
@@ -99,5 +158,6 @@ opposite `T73` about ten seconds, but for three tricks the hardest known,
 `Goal::ExactExpected` needs the full vectors and takes about twenty seconds
 on `A953` opposite `KJ8`.  The web trainer runs the solver in a worker, so
 the page stays responsive; a random deal is abandoned after two seconds and
-another dealt, and a combination you enter yourself runs until it finishes
-or you cancel it.
+another dealt, and a combination you enter yourself searches ten seconds at a
+time until it finishes or you stop it.  When a search is interrupted its bound comes from
+double dummy, which costs at most about 20 ms (`KJ9753` opposite a void).

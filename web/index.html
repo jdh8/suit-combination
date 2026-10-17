@@ -32,7 +32,9 @@
       <button id="new" class="primary">New problem</button>
       <span class="boardinfo" id="info"></span>
       <button id="cancel" class="secondary hidden">Cancel</button>
+      <button id="more" class="secondary hidden">Keep searching</button>
     </div>
+    <div class="goals hidden" id="results"></div>
 
     <details class="custom">
       <summary>Enter your own combination</summary>
@@ -53,7 +55,9 @@
       pick the card that hurts most.  Odds are a-priori vacant-places weights.
       The engine searches declarer strategies, not per-branch guesses, and is
       exact for trick targets; for the most tricks on average it says when
-      the line it found is not proven best.</p>
+      the line it found is not proven best.  Each goal shows as proven, best
+      found (with a bound no line beats), or interrupted (with that bound
+      only).</p>
   </main>
   <script type="module" src="app.js"></script>
 </body>

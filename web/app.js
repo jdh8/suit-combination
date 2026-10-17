@@ -1,5 +1,6 @@
 // Thin UI over the wasm solver, which runs in a worker (worker.js): one
-// `Trainer` per combination returns every goal's optimal line; JS picks an
+// `Trainer` per combination answers each goal's analysis.  JS solves the
+// goals in short slices so each result shows as it arrives, picks an
 // interesting goal, deals the defenders' cards, and plays the suit out,
 // grading each card declarer chooses.
 
@@ -8,29 +9,39 @@ const RANKS = '23456789TJQKA'; // index + 2 = rank value used in the JSON
 const SUITS = [['♠', 's-s'], ['♥', 's-h'], ['♦', 's-d'], ['♣', 's-c']];
 const id = (x) => document.getElementById(x);
 
-// { north, south, suit, analysis, all, snap, plays, log, lead, done, busy }
+// { search, north, south, suit, analysis, snap, plays, log, lead, done, busy }
 let problem = null;
+// The combination being solved (see newSearch)
+let search = null;
 
 // --- solver worker ----------------------------------------------------------
 
-// Each call is a message with an id; the reply carries the same id.  A search
-// cannot be interrupted, so a timeout or cancel terminates the worker and
-// spawns a fresh one, failing every call in flight.
+// Each call is a message with an id; the reply carries the same id.  An
+// analysis given a budget stops itself in time (give or take one costly
+// state) and keeps what it finished, so the next call goes on from there.
+// Terminating the worker is the hard stop: it fails every call in flight and
+// loses the memo.
+const SLICE = 300; // ms per analysis call, so results and bounds show as they come
+const SESSION = 10000; // ms a search on a combination you enter runs before it waits for "keep searching"
 const RANDOM_BUDGET = 2000; // ms a random combination may take before we deal another
-const EXACT_BUDGET = 10000; // ms the exact expected-tricks search gets on a combination you enter
+const HARD_STOP = 100; // ms a cancelled call may take to return before the worker is terminated
 let worker;
+let loaded = null; // `${north} ${south}` of the Trainer in the worker
+let full = false; // an analysis stopped at the worker's memory cap, and wasm memory never shrinks
 let nextId = 0;
 const pending = new Map(); // id -> { resolve, reject, timer }
 
 function spawn() {
   worker = new Worker('./worker.js', { type: 'module' });
+  loaded = null;
+  full = false;
   worker.onmessage = ({ data }) => {
     const p = pending.get(data.id);
     if (!p) return;
     pending.delete(data.id);
     clearTimeout(p.timer);
     if (data.error === undefined) p.resolve(data.result);
-    else p.reject(new Error(data.fatal ? `solver crashed, probably out of memory (${data.error})` : data.error));
+    else p.reject(Object.assign(new Error(data.fatal ? `solver crashed, probably out of memory (${data.error})` : data.error), { fatal: data.fatal }));
     if (data.fatal) abort(data.error);
   };
   worker.onerror = (e) => abort(e.message || 'solver crashed');
@@ -46,43 +57,180 @@ function abort(reason) {
   spawn();
 }
 
-function call(op, args, ms) {
+// `budget`: ms the analysis may take; `ms`: terminate the worker if no
+// answer comes in that time
+function call(op, args = [], budget = undefined, ms = undefined) {
   return new Promise((resolve, reject) => {
     const n = nextId++;
-    const timer = ms && setTimeout(() => abort(`gave up after ${ms / 1000} s`), ms);
+    const timer = ms && setTimeout(() => abort(`gave up after ${(ms / 1000).toFixed(1)} s`), ms);
     pending.set(n, { resolve, reject, timer });
-    worker.postMessage({ id: n, op, args });
+    worker.postMessage({ id: n, op, args, budget });
   });
 }
 
-// Solves a combination: every target, then expected tricks if `ev`, each
-// within `ms` (no limit when undefined).  Expected tricks first come from the
-// targets' lines, which is quick; when the bound does not prove that line
-// best, the exact search, which can take minutes, gets `ms` or EXACT_BUDGET.
-// Running out of time or cancelling there keeps the line; the worker
-// restarts, so the targets and the line are solved again for play.  Only one
-// search runs at a time.
-async function solve(north, south, ms, ev = true) {
-  if (pending.size) abort('superseded');
-  id('cancel').classList.remove('hidden');
+// --- goals and searches -----------------------------------------------------
+
+// Goals by key: `t3` for three tricks, `ev` for the targets' combined line,
+// `exact` for the exact expected-tricks search
+const goalKey = (goal) => (goal.kind === 'tricks' ? `t${goal.target}` : goal.kind === 'expected' ? 'ev' : 'exact');
+const goalOf = (key) => (key === 'ev' ? { kind: 'expected' } : key === 'exact' ? { kind: 'exact_expected' } : { kind: 'tricks', target: Number(key.slice(1)) });
+const goalLabel = (key) => (key === 'ev' ? 'EV' : key === 'exact' ? 'EV (exact)' : `≥${key.slice(1)}`);
+// An Analysis, not {interrupted, bound}
+const finished = (r) => r !== undefined && !r.interrupted;
+// Searched as far as it can go: finished, or stopped for memory
+const closed = (r) => finished(r) || r?.memory;
+const secs = (ms) => `${(ms / 1000).toFixed(1)} s`;
+
+function solveGoal(key, budget, ms) {
+  const [op, args] = key === 'ev' ? ['expected', [false]] : key === 'exact' ? ['expected', [true]] : ['target', [Number(key.slice(1))]];
+  return call(op, args, budget, ms).then(JSON.parse);
+}
+
+// A combination's goals in the order to solve them, the one asked for
+// first, with each one's latest result.  `warm`: goals whose analysis the
+// worker's memo holds, which play needs.
+function newSearch(north, south, want, visible) {
+  if (search?.running) {
+    search.stop = true;
+    if (pending.size) abort('superseded');
+  }
+  const targets = Array.from({ length: Math.max(north.length, south.length) }, (_, i) => `t${i + 1}`);
+  const keys = [...new Set([want, ...targets, 'ev'])];
+  search = { north, south, want, keys, results: new Map(), warm: new Set(), running: false, stop: false, current: null, since: 0, visible };
+  problem = null;
+  id('table').innerHTML = '';
+  id('feedback').classList.add('hidden');
+  showSearch();
+  return search;
+}
+
+async function load(s) {
+  const key = `${s.north} ${s.south}`;
+  if (loaded === key) return;
+  if (full && !pending.size) {
+    worker.terminate();
+    spawn();
+  }
+  await call('load', [s.north, s.south]);
+  loaded = key;
+  s.warm.clear();
+}
+
+// The goal asked for is done: for expected tricks, the line is proven best
+// or the exact search has finished too.
+function settled(s) {
+  const r = s.results.get(s.want);
+  if (!finished(r)) return false;
+  return s.want !== 'ev' || r.proven || finished(s.results.get('exact'));
+}
+
+// Expected tricks not asked for wait for the targets, whose searches they
+// would only go on with (where one costly state can hold a slice for seconds)
+const waits = (s, key) => key !== s.want && !key.startsWith('t') && s.keys.some((k) => k.startsWith('t') && !closed(s.results.get(k)) && s.results.has(k));
+
+// Solves the open goals of `s` in slices of SLICE ms, round robin, until
+// all are finished, the goal asked for is settled (after every goal has had
+// a turn), SESSION ms pass, or the user cancels; then, if no game is on yet,
+// plays the goal asked for when it is finished.  Cancelling keeps every
+// result so far.
+async function runSearch(s) {
+  s.running = true;
+  s.stop = false;
+  s.since = performance.now();
+  const ticker = setInterval(showSearch, 100);
+  showSearch();
+  let failed = null;
   try {
-    const all = JSON.parse(await call('solve', [north, south], ms));
-    if (!ev) return all;
-    const line = JSON.parse(await call('expected', [false], ms));
-    if (line.score === line.bound) {
-      all.push(line);
-      return all;
+    await load(s);
+    while (!s.stop && performance.now() - s.since < SESSION) {
+      const open = s.keys.filter((k) => !closed(s.results.get(k)));
+      if (!open.length) break;
+      for (const key of open) {
+        if (s.stop || performance.now() - s.since >= SESSION) break;
+        if (waits(s, key)) continue;
+        s.current = key;
+        showSearch();
+        const r = await solveGoal(key, SLICE);
+        if (search !== s) throw new Error('superseded');
+        s.results.set(key, r);
+        if (finished(r)) s.warm.add(key);
+        full ||= r.memory;
+        // The combined line is not proven best: the exact search may beat it.
+        if (key === 'ev' && s.want === 'ev' && finished(r) && !r.proven && !s.keys.includes('exact')) s.keys.push('exact');
+      }
+      if (settled(s)) break;
     }
-    try {
-      all.push(JSON.parse(await call('expected', [true], ms ?? EXACT_BUDGET)));
-    } catch (e) {
-      if (!e.message.startsWith('gave up') && e.message !== 'cancelled') throw e;
-      await call('solve', [north, south]);
-      all.push(JSON.parse(await call('expected', [false])));
+  } catch (e) {
+    failed = e.message;
+    // A crash (out of memory) lost the memo: keep the goal's last bound, and
+    // do not try it again.
+    if (e.fatal && s.current) s.results.set(s.current, { ...s.results.get(s.current), interrupted: true, memory: true });
+  }
+  s.current = null;
+  showSearch();
+  try {
+    // Play what has finished, after a cancel or a crash too
+    if (search === s && problem?.search !== s) {
+      const exact = s.results.get('exact');
+      const a = s.want === 'ev' && finished(exact) ? exact : s.results.get(s.want);
+      if (finished(a)) await setProblem(s, a);
     }
-    return all;
-  } finally {
-    id('cancel').classList.add('hidden');
+  } catch (e) {
+    failed = e.message;
+  }
+  clearInterval(ticker);
+  if (search !== s) return;
+  s.running = false;
+  if (!s.results.size) s.visible = false;
+  showSearch();
+  if (failed && failed !== 'cancelled') info(failed, true);
+  else if (!finished(s.results.get(s.want))) info(`${goalLabel(s.want)} not solved yet${closed(s.results.get(s.want)) ? '' : ': keep searching, or try another combination'}`);
+}
+
+// Stops the search: the call in flight ends at its budget, and past
+// HARD_STOP the worker is terminated, unless it holds the game being played.
+function cancel() {
+  const s = search;
+  if (!s?.running) return;
+  s.stop = true;
+  setTimeout(() => {
+    if (search === s && s.running && problem?.search !== s) abort('cancelled');
+  }, HARD_STOP);
+}
+
+// One goal's status: proven, best found (with the bound), or interrupted
+// (with the bound); `solving` while its slice runs
+function goalStatus(s, key) {
+  const r = s.results.get(key);
+  const label = `<b>${goalLabel(key)}</b>`;
+  const at = (goal, score) => value(goal, score, TOTAL);
+  // An interrupted search's bound, if any
+  const bound = r?.interrupted && r.bound !== undefined ? ` (≤ ${at(goalOf(key), r.bound)})` : '';
+  if (s.current === key && s.running) return `${label} solving…${bound}`;
+  if (waits(s, key) && !r) return `${label} waiting for the targets`;
+  if (r === undefined) return `${label} waiting`;
+  if (r.memory) return `${label} out of memory${bound}`;
+  if (r.interrupted) return `${label} interrupted${bound}`;
+  if (r.proven) return `${label} ${at(r.goal, r.score)} proven`;
+  return `${label} ${at(r.goal, r.score)} best found (≤ ${at(r.goal, r.bound)})`;
+}
+
+// The goals strip, the buttons, and while searching the elapsed time
+function showSearch() {
+  const s = search;
+  const el = id('results');
+  el.classList.toggle('hidden', !s?.visible);
+  if (s?.visible) {
+    el.innerHTML = s.keys
+      .map((k) => `<span class="${k === s.want ? 'active' : ''}">${goalStatus(s, k)}</span>`)
+      .join('');
+  }
+  id('cancel').classList.toggle('hidden', !s?.running);
+  const open = s?.visible && s.keys.some((k) => !closed(s.results.get(k)));
+  id('more').classList.toggle('hidden', !open || s.running);
+  if (s?.running && s.visible && (s.current || problem?.search !== s)) {
+    const doing = s.current ? `Solving ${goalLabel(s.current)}` : 'Preparing play';
+    info(`${doing}… ${secs(performance.now() - s.since)}`);
   }
 }
 
@@ -90,7 +238,8 @@ async function main() {
   spawn();
   id('new').onclick = newProblem;
   id('solve').onclick = customProblem;
-  id('cancel').onclick = () => abort('cancelled');
+  id('cancel').onclick = cancel;
+  id('more').onclick = () => search && !search.running && runSearch(search);
   for (const el of ['c-north', 'c-south', 'c-goal']) {
     id(el).onkeydown = (ev) => { if (ev.key === 'Enter') customProblem(); };
   }
@@ -128,26 +277,66 @@ function interesting(a) {
 async function newProblem() {
   const lengths = id('length').value.split(',').map(Number);
   const kind = id('goalkind').value;
+  const started = performance.now();
+  const ticker = setInterval(() => info(`Dealing… ${secs(performance.now() - started)}`), 100);
   info('Dealing…');
   try {
     for (let attempt = 0; attempt < 200; attempt++) {
       const [north, south] = randomHoldings(lengths[Math.floor(Math.random() * lengths.length)]);
-      let all;
-      try {
-        all = await solve(north, south, RANDOM_BUDGET);
-      } catch (e) {
-        if (String(e.message).startsWith('gave up')) continue; // too hard to wait for: deal another
-        throw e;
-      }
+      const s = newSearch(north, south, 't1', false);
+      const all = await solveRandom(s);
+      if (search !== s) return; // a newer request took over
+      if (!all) continue; // too hard to wait for: deal another
       const goals = all.filter((a) => (kind === 'any' || (a.goal.kind === 'tricks') === (kind === 'tricks')) && interesting(a));
       if (goals.length === 0) continue;
-      await setProblem(north, south, all, goals[Math.floor(Math.random() * goals.length)]);
+      const pick = goals[Math.floor(Math.random() * goals.length)];
+      s.want = goalKey(pick.goal);
+      clearInterval(ticker);
+      await setProblem(s, pick);
       return;
     }
     info('Could not find an interesting problem with these settings.', true);
   } catch (e) {
-    if (e.message !== 'superseded') info(String(e.message), true); // a newer request took over
+    if (e.message !== 'superseded') info(String(e.message), e.message !== 'cancelled');
+  } finally {
+    clearInterval(ticker);
   }
+}
+
+// Every target and expected tricks of a random combination within
+// RANDOM_BUDGET in all, or null if that is not enough.  When the line is
+// not proven best, the exact search gets the time left, and replaces the
+// line if it finishes.
+async function solveRandom(s) {
+  const deadline = performance.now() + RANDOM_BUDGET;
+  const left = () => deadline - performance.now();
+  s.running = true;
+  try {
+    await load(s);
+    for (const key of s.keys) {
+      if (left() <= 0) return null;
+      const r = await solveGoal(key, left(), left() + 1000);
+      if (r.interrupted) return null;
+      s.results.set(key, r);
+      s.warm.add(key);
+    }
+    if (!s.results.get('ev').proven && left() > 0) {
+      s.keys.push('exact');
+      const r = await solveGoal('exact', left(), left() + 1000);
+      s.results.set('exact', r);
+      if (finished(r)) s.warm.add('exact');
+    }
+  } catch (e) {
+    if (String(e.message).startsWith('gave up')) return null;
+    throw e;
+  } finally {
+    s.running = false;
+  }
+  const exact = s.results.get('exact');
+  return s.keys
+    .filter((k) => k.startsWith('t'))
+    .map((k) => s.results.get(k))
+    .concat(finished(exact) ? exact : s.results.get('ev'));
 }
 
 // Accepts "aj52", "A J 10 2", "AJT2"; returns ranks in descending order.
@@ -161,36 +350,38 @@ async function customProblem() {
   const north = normalize(id('c-north').value);
   const south = normalize(id('c-south').value);
   const goalText = id('c-goal').value.trim().toLowerCase();
-  info('Solving… (some combinations take a while)');
   const wantEV = goalText === '' || goalText.startsWith('e');
-  let all;
-  try {
-    all = await solve(north, south, undefined, wantEV);
-  } catch (e) {
-    if (e.message !== 'superseded') info(String(e.message), e.message !== 'cancelled');
-    return;
-  }
-  let analysis;
-  if (wantEV) analysis = all.find((a) => a.goal.kind !== 'tricks');
-  else analysis = all.find((a) => a.goal.kind === 'tricks' && a.goal.target === Number(goalText));
-  if (!analysis) {
+  const target = Number(goalText);
+  if (!wantEV && !(Number.isInteger(target) && target >= 1 && target <= Math.max(north.length, south.length))) {
     info(`No such goal: ${goalText}`, true);
     return;
   }
-  await setProblem(north, south, all, analysis);
+  await runSearch(newSearch(north, south, wantEV ? 'ev' : `t${target}`, true));
 }
 
-async function setProblem(north, south, all, analysis) {
+// Deals the defenders' cards and starts playing for `analysis`
+async function setProblem(s, analysis) {
+  const key = goalKey(analysis.goal);
+  await load(s);
+  // A cancel may have replaced the worker since: solve the goal again for play.
+  if (!s.warm.has(key)) {
+    await solveGoal(key);
+    s.warm.add(key);
+  }
   // West's cards in the suit are those among a random 13 of the 26 unseen
   // cards, so every split comes up with its vacant-places odds.
+  const { north, south } = s;
   const missing = [...RANKS].filter((c) => !north.includes(c) && !south.includes(c)).map((c) => RANKS.indexOf(c) + 2);
   const west = fmt(shuffle([...missing, ...Array(26 - missing.length).fill(0)]).slice(0, 13).filter(Boolean));
   const target = analysis.goal.kind === 'tricks' ? analysis.goal.target : undefined;
   const snap = JSON.parse(await call('start', [west, target, analysis.goal.kind === 'exact_expected']));
+  if (search !== s) return;
   const suit = SUITS[Math.floor(Math.random() * SUITS.length)];
-  problem = { north, south, suit, analysis, all, snap, plays: [...snap.plays], log: [], lead: null, done: false, busy: false };
+  problem = { search: s, north, south, suit, analysis, snap, plays: [...snap.plays], log: [], lead: null, done: false, busy: false };
+  s.visible = true;
   info('');
   render();
+  showSearch();
   id('feedback').classList.add('hidden');
 }
 
@@ -287,7 +478,7 @@ function render() {
   const s = document.createElement('p');
   s.className = 'status';
   s.innerHTML = `<span>Tricks won: ${snap.won}</span>`
-    + (playing ? `<span>Best from here: ${value(analysis.goal, Math.max(...snap.moves.map((m) => m.score)), snap.weight)}</span>
+    + (playing ? `<span>${analysis.proven ? 'Best' : 'Best found'} from here: ${value(analysis.goal, Math.max(...snap.moves.map((m) => m.score)), snap.weight)}</span>
       <button class="secondary" id="reveal">Show solution</button>` : '');
   el.appendChild(s);
   if (playing) id('reveal').onclick = finish;
@@ -318,7 +509,7 @@ async function play(rank) {
   log.push({
     ok,
     text: `Trick ${Math.floor(plays.length / 4) + 1}, ${chosen.seat} ${cardText(rank)}: ${value(goal, chosen.score, snap.weight)}`
-      + (ok ? '' : `; best ${value(goal, best, snap.weight)} with ${alternatives}`),
+      + (ok ? '' : `; ${analysis.proven ? 'best' : 'best found'} ${value(goal, best, snap.weight)} with ${alternatives}`),
   });
   // Every state was memoized by the analysis, so this is quick.
   let next;
@@ -338,7 +529,7 @@ async function play(rank) {
 
 // Ends the play (if still going) and shows the full analysis.
 function finish() {
-  const { analysis, all, snap, lead, log } = problem;
+  const { analysis, snap, lead, log } = problem;
   const goal = analysis.goal;
   problem.done = true;
   render();
@@ -356,28 +547,30 @@ function finish() {
     verdict = `${snap.won} tricks taken`;
   }
   const mistakes = log.filter((l) => !l.ok).length;
-  const played = log.length ? ` — ${mistakes === 0 ? 'every card was best' : `${mistakes} card${mistakes === 1 ? '' : 's'} not best`}` : '';
+  const bestWord = analysis.proven ? 'best' : 'the best found';
+  const played = log.length ? ` — ${mistakes === 0 ? `every card was ${bestWord}` : `${mistakes} card${mistakes === 1 ? '' : 's'} not ${bestWord}`}` : '';
+  // Unproven, each lead shows what no line after it can beat.
   const rows = [...analysis.leads]
     .sort((a, b) => b.score - a.score)
     .map((l) => `<tr class="${l.score === best ? 'best' : ''} ${lead && l.seat === lead.seat && l.cards === lead.cards ? 'chosen' : ''}">
-      <td>${l.seat}: ${cardsText(l.cards)}</td><td class="num">${value(goal, l.score, TOTAL)}</td></tr>`)
+      <td>${l.seat}: ${cardsText(l.cards)}</td><td class="num">${value(goal, l.score, TOTAL)}</td>
+      <td class="num">${l.bound > l.score ? `≤ ${value(goal, l.bound, TOTAL)}` : ''}</td></tr>`)
     .join('');
-  const goals = all.map((a) => `<span class="${a === analysis ? 'active' : ''}">${a.goal.kind === 'tricks' ? `≥${a.goal.target}: ` : 'EV: '}${value(a.goal, a.score, TOTAL)}${a.bound > a.score ? ` (best ≤ ${(a.bound / TOTAL).toFixed(2)})` : ''}</span>`).join('');
   // The expected-tricks line when neither its bound nor the exact search
   // (out of time) showed it is the best
-  const unproven = analysis.bound > analysis.score
-    ? `<p class="note">Best line found; the best possible is at most ${value(goal, analysis.bound, TOTAL)}, so a line here may be graded best that is not.</p>`
-    : '';
+  const exact = problem.search.results.get('exact');
+  const since = finished(exact) && analysis !== exact ? ` The exact search, finished since, gives ${value(goal, exact.score, TOTAL)}.` : '';
+  const unproven = analysis.proven
+    ? ''
+    : `<p class="note">Best line found; the best possible is at most ${value(goal, analysis.bound, TOTAL)}, so a line here may be graded best that is not.${since}</p>`;
   const fb = id('feedback');
   fb.classList.remove('hidden');
   fb.innerHTML = `
     <p class="verdict ${ok ? 'ok' : 'no'}">${verdict}${played}</p>
     <div class="panel-title">Every lead</div>
     <table class="leads">${rows}</table>
-    <div class="panel-title">Optimal line</div>${unproven}
+    <div class="panel-title">${analysis.proven ? 'Optimal line' : 'Line found'}</div>${unproven}
     <div class="plan"><ul>${planItems(analysis.plan, goal)}</ul></div>
-    <div class="panel-title">This combination</div>
-    <div class="goals">${goals}</div>
     <p style="margin:0.8rem 0 0"><button class="primary" id="next">Next problem</button></p>`;
   id('next').onclick = newProblem;
 }

@@ -20,6 +20,13 @@
 //! between the line found ([`Analysis::score`]) and the sum of the targets'
 //! success probabilities ([`Analysis::bound`]).
 //!
+//! A search can be stopped early by [`Solver::set_interrupt`]:
+//! [`Solver::analyze`] then fails with [`Error::Interrupted`], which still
+//! carries an upper bound on the optimum (each trick target's score where
+//! its search has finished, else what declarer would make seeing all four
+//! hands).  The memo keeps only finished work, so asking again goes on from
+//! there.
+//!
 //! Missing cards with no live declarer card between them are interchangeable:
 //! declarer never competes one defender's card against the other's, and a
 //! strategy that told them apart could be replaced by a symmetric one no
@@ -54,6 +61,10 @@ pub enum Error {
     BadWest,
     /// The card is not one declarer may play now
     NotPlayable,
+    /// [`Solver::set_interrupt`] stopped the search.  No line is known, but
+    /// no line scores more than `bound` (out of [`TOTAL`], as
+    /// [`Analysis::score`])
+    Interrupted { bound: u64 },
 }
 
 impl fmt::Display for Error {
@@ -64,6 +75,10 @@ impl fmt::Display for Error {
             Self::BadTarget => "target must be 1..=longer hand",
             Self::BadWest => "West holds a card of North or South",
             Self::NotPlayable => "that card cannot be played now",
+            Self::Interrupted { bound } => {
+                let bound = *bound as f64 / TOTAL as f64;
+                return write!(f, "search interrupted; the best is at most {bound:.4}");
+            }
         })
     }
 }
@@ -118,6 +133,12 @@ pub struct Lead {
     pub cards: Holding,
     /// Best [`Analysis::score`] after this lead
     pub score: u64,
+    /// At least the best score of any line starting with this lead: equal
+    /// to `score` except for [`Goal::Expected`], where it is the sum of every
+    /// target's score after the lead.  [`Analysis::bound`] is one bound for
+    /// every lead; `score == bound` here proves this lead's line the best
+    /// after it.
+    pub bound: u64,
 }
 
 /// Result of [`analyze`]
@@ -134,6 +155,9 @@ pub struct Analysis {
     /// At least the best `score` of any line: equal to it except for
     /// [`Goal::Expected`], where it is the sum of every target's score
     pub bound: u64,
+    /// `score == bound`: the line is the best there is.  Otherwise the best
+    /// lies in `score..=bound`.
+    pub proven: bool,
     pub leads: Vec<Lead>,
     pub plan: Plan,
 }
@@ -559,6 +583,72 @@ impl Structure {
     }
 }
 
+/// Tricks declarer takes from here, between tricks, with every card in
+/// view: `hands` are the cards of North, East, South, West, and `memo` maps
+/// the cards still out (which, in one deal, fix every hand) to the answer
+fn dd_tricks(hands: [u16; 4], memo: &mut FxMap<u16, u8>) -> u8 {
+    if hands[0] | hands[2] == 0 {
+        return 0;
+    }
+    let out = hands.iter().fold(0, |acc, h| acc | h);
+    if let Some(&t) = memo.get(&out) {
+        return t;
+    }
+    let t = [0, 2]
+        .into_iter()
+        .filter(|&at| hands[at] != 0)
+        .map(|at| dd_trick(hands, at, [0; 4], 0, memo))
+        .max()
+        .unwrap_or(0);
+    memo.insert(out, t);
+    t
+}
+
+/// [`dd_tricks`] within the trick `leader` led, with `trick[..played]` on
+/// the table.  A hand plays only the lowest of cards with nothing out or on
+/// the table between them; a void hand discards (rank 0).
+fn dd_trick(
+    hands: [u16; 4],
+    leader: usize,
+    trick: [u8; 4],
+    played: usize,
+    memo: &mut FxMap<u16, u8>,
+) -> u8 {
+    if played == 4 {
+        let pos = (0..4).max_by_key(|&p| trick[p]).unwrap();
+        return u8::from((leader + pos).is_multiple_of(2)) + dd_tricks(hands, memo);
+    }
+    let at = (leader + played) % 4;
+    let hand = hands[at];
+    let deck = trick
+        .iter()
+        .fold(hands.iter().fold(0, |a, h| a | h), |a, &r| a | 1 << r)
+        & !1;
+    let options = if hand == 0 {
+        1
+    } else {
+        ranks(hand)
+            .filter(|&r| {
+                let below = deck & ((1 << r) - 1);
+                below == 0 || hand >> (15 - below.leading_zeros()) & 1 == 0
+            })
+            .fold(0, |a, r| a | 1 << r)
+    };
+    let outcomes = (0..15).filter(|r| options >> r & 1 != 0).map(|r| {
+        let mut h = hands;
+        h[at] &= !(1 << r);
+        let mut t = trick;
+        t[played] = r;
+        dd_trick(h, leader, t, played + 1, memo)
+    });
+    if at.is_multiple_of(2) {
+        outcomes.max()
+    } else {
+        outcomes.min()
+    }
+    .unwrap()
+}
+
 /// rustc's FxHasher: one multiply per word, for the memo tables' small,
 /// trusted keys.  The final rotation (as in rustc-hash 2) brings the
 /// well-mixed high bits down to the bucket index.
@@ -624,7 +714,21 @@ pub struct Solver {
     maps: FxMap<(u16, u16), Rc<[usize]>>,
     /// [`Goal::Expected`] lines by state and requirement followed
     memo_line: FxMap<(State, Tricks), (Tricks, Step)>,
+    /// See [`set_interrupt`](Self::set_interrupt)
+    interrupt: Option<Box<dyn FnMut(usize) -> bool>>,
+    /// Memo misses between polls of `interrupt`, and since the last poll
+    poll_every: u32,
+    misses: u32,
+    /// `analyze` is running with an interrupt: memo misses poll it
+    armed: bool,
+    /// The interrupt fired: every search returns at once and memoizes nothing
+    interrupted: bool,
+    /// Double-dummy tricks per root layout, once an interrupt needs them
+    dd: Option<Rc<[u8]>>,
 }
+
+/// Memo misses between polls of [`Solver::set_interrupt`]'s callback
+const POLL_EVERY: u32 = 1024;
 
 /// How a [`Goal::Expected`] line goes on from a state
 #[derive(Debug, Clone, Copy)]
@@ -657,7 +761,52 @@ impl Solver {
             memo_t: FxMap::default(),
             maps: FxMap::default(),
             memo_line: FxMap::default(),
+            interrupt: None,
+            poll_every: POLL_EVERY,
+            misses: 0,
+            armed: false,
+            interrupted: false,
+            dd: None,
         })
+    }
+
+    /// Let `f` stop [`analyze`](Self::analyze) early.  It is called every
+    /// 1024 or so states searched, with the number of states memoized (a
+    /// proxy for memory), and returning `true` makes `analyze` fail with
+    /// [`Error::Interrupted`].  Nothing half-searched is memoized, so the
+    /// next call goes on from where this one stopped.  [`Game`] never
+    /// polls it.
+    // ponytail: polled between states, so one state whose antichains take
+    // seconds to combine (KJ9753 opposite a void) overruns by that much;
+    // killing the thread or worker is the hard stop.
+    pub fn set_interrupt(&mut self, f: impl FnMut(usize) -> bool + 'static) {
+        self.interrupt = Some(Box::new(f));
+    }
+
+    /// Search to the end again
+    pub fn clear_interrupt(&mut self) {
+        self.interrupt = None;
+    }
+
+    /// Poll the interrupt every `n` memo misses instead of 1024, so tests
+    /// can stop small searches anywhere
+    #[doc(hidden)]
+    pub fn set_poll_interval(&mut self, n: u32) {
+        self.poll_every = n.max(1);
+    }
+
+    /// Count a memo miss, polling the interrupt when due.  True once it has
+    /// fired: the caller returns at once.
+    fn tick(&mut self) -> bool {
+        if self.armed && !self.interrupted {
+            self.misses += 1;
+            if self.misses >= self.poll_every {
+                self.misses = 0;
+                let states = self.memo.len() + self.memo_t.len() + self.memo_line.len();
+                self.interrupted = self.interrupt.as_mut().is_some_and(|f| f(states));
+            }
+        }
+        self.interrupted
     }
 
     /// Diagnostics for benchmarks: memoized states and the largest antichain
@@ -772,7 +921,7 @@ impl Solver {
     }
 
     /// [`Analysis`] for every target from one trick up to the longer hand's
-    /// length, then for [`Goal::Expected`]
+    /// length, then for [`Goal::Expected`]; the first goal interrupted ends it
     pub fn analyze_all(&mut self) -> Result<Vec<Analysis>, Error> {
         (1..=self.max_tricks())
             .map(|target| Goal::Tricks { target })
@@ -781,8 +930,24 @@ impl Solver {
             .collect()
     }
 
+    /// Best line for `goal`, or [`Error::Interrupted`] if the interrupt
+    /// (see [`set_interrupt`](Self::set_interrupt)) fires first
     pub fn analyze(&mut self, goal: Goal) -> Result<Analysis, Error> {
         self.check(goal)?;
+        self.armed = self.interrupt.is_some();
+        self.misses = 0;
+        let a = self.search(goal);
+        self.armed = false;
+        if std::mem::take(&mut self.interrupted) {
+            return Err(Error::Interrupted {
+                bound: self.ceiling(goal),
+            });
+        }
+        a
+    }
+
+    /// [`analyze`](Self::analyze) without the bookkeeping of interrupts
+    fn search(&mut self, goal: Goal) -> Result<Analysis, Error> {
         let root = self.root();
         let structure = self.structure(root.live());
         let c = Self::consistent(&root, &structure);
@@ -801,10 +966,15 @@ impl Solver {
                 }
                 _ => self.value(st, goal, 0),
             };
+            let bound = match goal {
+                Goal::Expected => self.target_sum(st, 0),
+                _ => score,
+            };
             leads.push(Lead {
                 seat: seat(at),
                 cards: Holding::from_bits_truncate(cards),
                 score,
+                bound,
             });
             if best.is_none_or(|(s, _, _)| score > s) {
                 best = Some((score, v, i));
@@ -827,9 +997,7 @@ impl Solver {
             then: Box::new(then),
         };
         let bound = match goal {
-            Goal::Expected => (1..=self.max_tricks())
-                .map(|target| self.value(root, Goal::Tricks { target }, 0).0)
-                .sum(),
+            Goal::Expected => self.target_sum(root, 0),
             _ => score,
         };
         Ok(Analysis {
@@ -838,9 +1006,71 @@ impl Solver {
             goal,
             score,
             bound,
+            proven: score == bound,
             leads,
             plan,
         })
+    }
+
+    /// Sum over the targets of their best score from `st` after `won`
+    /// tricks: no line from there makes more tricks on average
+    fn target_sum(&mut self, st: State, won: u8) -> u64 {
+        (1..=self.max_tricks())
+            .map(|target| self.value(st, Goal::Tricks { target }, won).0)
+            .sum()
+    }
+
+    /// Upper bound on the best score for `goal` from what an interrupted
+    /// search has finished: a target's score if its search is done, else
+    /// its double-dummy score; for expected tricks, the sum over targets
+    fn ceiling(&mut self, goal: Goal) -> u64 {
+        let root = self.root();
+        let s = self.structure(root.live());
+        let dd = self.double_dummy();
+        let max = self.max_tricks();
+        let mut target = |target: u8| {
+            if self.memo_t.contains_key(&(root, target)) {
+                self.value(root, Goal::Tricks { target }, 0).0
+            } else {
+                (0..s.len)
+                    .filter(|&i| dd[i] >= target)
+                    .map(|i| s.weight[i])
+                    .sum()
+            }
+        };
+        match goal {
+            Goal::Tricks { target: t } => target(t),
+            _ => (1..=max).map(target).sum(),
+        }
+    }
+
+    /// Tricks declarer takes on each root layout seeing all four hands,
+    /// which no line beats.  One representative deal per layout: missing
+    /// cards of a class are interchangeable.
+    fn double_dummy(&mut self) -> Rc<[u8]> {
+        if let Some(dd) = &self.dd {
+            return Rc::clone(dd);
+        }
+        let s = self.structure(self.root().live());
+        let mut memo = FxMap::default();
+        let dd: Rc<[u8]> = (0..s.len)
+            .map(|i| {
+                let west = s.classes.iter().fold(0, |acc, c| {
+                    let k = i / c.stride % (usize::from(c.size) + 1);
+                    acc | ranks(c.ranks).take(k).fold(0, |a, r| a | 1 << r)
+                });
+                let hands = [
+                    self.north.to_bits(),
+                    self.missing & !west,
+                    self.south.to_bits(),
+                    west,
+                ];
+                memo.clear();
+                dd_tricks(hands, &mut memo)
+            })
+            .collect();
+        self.dd = Some(Rc::clone(&dd));
+        dd
     }
 
     /// Layouts consistent with what declarer has seen
@@ -1000,20 +1230,23 @@ impl Solver {
         if let Some(v) = self.memo.get(&st) {
             return v.clone();
         }
+        if self.tick() {
+            return Vec::new();
+        }
         let s = self.structure(st.live());
         let c = Self::consistent(&st, &s);
         let out = if st.played == 0 && st.ns == [0; 2] {
             vec![Tricks::ZERO]
         } else if Self::is_declarer_turn(&st) {
             let moves = self.declarer_moves(&st, &s);
-            maximal(
-                moves
-                    .into_iter()
-                    .flat_map(|(ch, _, _)| self.feasible(ch))
-                    .collect(),
-                s.len,
-                None,
-            )
+            let vs = moves
+                .into_iter()
+                .flat_map(|(ch, _, _)| self.feasible(ch))
+                .collect();
+            if self.interrupted {
+                return Vec::new();
+            }
+            maximal(vs, s.len, None)
         } else {
             // The defender routes each layout to its worst legal branch, so a
             // continuation guarantees per layout the minimum over the
@@ -1027,11 +1260,14 @@ impl Solver {
             for (_, g, ch, won) in self.defender_moves(&st, &s, c) {
                 let map = self.map(&st, &ch);
                 let bonus = u8::from(won);
+                let ys = self.feasible(ch);
+                if self.interrupted {
+                    return Vec::new();
+                }
                 // Only the branch's legal layouts matter, so project onto
                 // them first: that collapses many continuations into one.
                 let sub = maximal(
-                    self.feasible(ch)
-                        .iter()
+                    ys.iter()
                         .map(|y| {
                             let mut p = Tricks::ZERO;
                             for i in g.iter() {
@@ -1061,7 +1297,9 @@ impl Solver {
             }
             acc
         };
-        self.memo.insert(st, out.clone());
+        if !self.interrupted {
+            self.memo.insert(st, out.clone());
+        }
         out
     }
 
@@ -1083,7 +1321,8 @@ impl Solver {
                     };
                 }
             }
-            unreachable!("req is feasible, so some move keeps it feasible");
+            assert!(self.interrupted, "req is feasible, so some move keeps it");
+            return Plan::Hopeless;
         }
         let seat_index = (st.leader + st.played) % 4;
         let mut branches: Vec<(Vec<Option<Rank>>, Plan)> = Vec::new();
@@ -1208,16 +1447,24 @@ impl Game {
         solver
             .declarer_moves(&self.st, &s)
             .into_iter()
-            .map(|(ch, at, cards)| Lead {
-                seat: seat(at),
-                cards: Holding::from_bits_truncate(cards),
-                score: match self.goal {
+            .map(|(ch, at, cards)| {
+                let (score, bound) = match self.goal {
                     Goal::Expected => {
                         let (t, _) = solver.best_line(ch, &self.reqs);
-                        Solver::score(&s, c, self.goal, self.won, &t)
+                        let score = Solver::score(&s, c, self.goal, self.won, &t);
+                        (score, solver.target_sum(ch, self.won))
                     }
-                    _ => solver.value(ch, self.goal, self.won).0,
-                },
+                    _ => {
+                        let score = solver.value(ch, self.goal, self.won).0;
+                        (score, score)
+                    }
+                };
+                Lead {
+                    seat: seat(at),
+                    cards: Holding::from_bits_truncate(cards),
+                    score,
+                    bound,
+                }
             })
             .collect()
     }
@@ -1397,16 +1644,19 @@ impl Solver {
         if let Some(v) = self.memo_t.get(&(st, need)) {
             return v.clone();
         }
+        if self.tick() {
+            return Vec::new();
+        }
         let out = if Self::is_declarer_turn(&st) {
             let moves = self.declarer_moves(&st, &s);
-            maximal_sets(
-                moves
-                    .into_iter()
-                    .flat_map(|(ch, _, _)| self.feasible_t(ch, need))
-                    .collect(),
-                s.len,
-                None,
-            )
+            let vs = moves
+                .into_iter()
+                .flat_map(|(ch, _, _)| self.feasible_t(ch, need))
+                .collect();
+            if self.interrupted {
+                return Vec::new();
+            }
+            maximal_sets(vs, s.len, None)
         } else {
             let mut acc = vec![c];
             for (_, g, ch, won) in self.defender_moves(&st, &s, c) {
@@ -1415,9 +1665,12 @@ impl Solver {
                     continue;
                 }
                 let map = self.map(&st, &ch);
+                let ys = self.feasible_t(ch, sub_need);
+                if self.interrupted {
+                    return Vec::new();
+                }
                 let sub = maximal_sets(
-                    self.feasible_t(ch, sub_need)
-                        .iter()
+                    ys.iter()
                         .map(|y| g.iter().filter(|&i| y.contains(map[i])).collect())
                         .collect(),
                     s.len,
@@ -1440,7 +1693,9 @@ impl Solver {
             }
             acc
         };
-        self.memo_t.insert((st, need), out.clone());
+        if !self.interrupted {
+            self.memo_t.insert((st, need), out.clone());
+        }
         out
     }
 
@@ -1487,6 +1742,9 @@ impl Solver {
         if let Some(&(t, _)) = self.memo_line.get(&(st, req)) {
             return t;
         }
+        if self.tick() {
+            return Tricks::ZERO;
+        }
         let s = self.structure(st.live());
         let c = Self::consistent(&st, &s);
         let ev = |t: &Tricks| Self::score(&s, c, Goal::Expected, 0, t);
@@ -1512,6 +1770,9 @@ impl Solver {
                     best = Some((ev(&t), t, Step::Move(k)));
                 }
             }
+            if self.interrupted {
+                return Tricks::ZERO;
+            }
             let (_, t, step) = best.expect("req is feasible, so some move keeps it");
             (t, step)
         } else {
@@ -1528,7 +1789,9 @@ impl Solver {
             }
             (t, Step::Branch)
         };
-        self.memo_line.insert((st, req), (t, step));
+        if !self.interrupted {
+            self.memo_line.insert((st, req), (t, step));
+        }
         t
     }
 
@@ -1556,6 +1819,9 @@ impl Solver {
     /// The [`line`](Self::line) from `st` following `req`, as a [`Plan`]
     fn plan_line(&mut self, st: State, req: Tricks) -> Plan {
         self.line(st, req);
+        if self.interrupted {
+            return Plan::Hopeless;
+        }
         let s = self.structure(st.live());
         let c = Self::consistent(&st, &s);
         match self.memo_line[&(st, req)].1 {
