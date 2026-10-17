@@ -91,9 +91,10 @@ larger than the earlier 600-combination study suggested (0.057).
 
 ## Phases
 
-Phases run in this order. The analysis view comes after constraints and
-MP/IMP scoring because it must expose both; building it last builds it once,
-on the final engine API. Phases 1 and 2 keep the numbers earlier commits
+Phases run in this order. Trick targets are the flagship: phase 3 builds
+constraints and coverage for them alone, and phase 4 treats expected tricks
+as a game of its own. The analysis view comes after both because it must
+expose them; building it last builds it once, on the final engine API. Phases 1 and 2 keep the numbers earlier commits
 cite; the rest were renumbered on 2026-10-18 to match the order (constraints
 was 4, scoring 5, the analysis view 3, the report part of 5).
 
@@ -159,11 +160,13 @@ Corpus, 902 runs at 30 s: 902 finish, p50 2.6 ms, p95 94 ms, max 13.6 s
 (`KJ9753 / -` exact). `KJ9753 / -` for three tricks went from over fifteen
 minutes to 0.74 s. Browser cancel takes 106–109 ms; on the worst case a
 bounded status shows by 1.96 s. Open: peak memory rose to 485 MB
-(`KJ9753 / -` ev, the `Expected` line memo); the trainer still budgets exact
+(`KJ9753 / -` ev, the `Expected` line memo, which phase 4 removes); the trainer still budgets exact
 search as if it took minutes; browser p95 over the corpus is not measured.
 
-### 3. Constraints and coverage
+### 3. Constraints and coverage for trick targets
 
+Targets only: every item is built, given fixtures and finished for
+`Goal::Tricks`. Expected-tricks goals reject each new option until phase 4.
 In order, each with an independent fixture before the next:
 
 1. Vacant places and known East/West cards; then length and HCP
@@ -183,32 +186,54 @@ constraints may break the equivalence-class argument: keep the distinctions
 inference needs and verify against uncompressed layouts. Constrained analysis
 gets its own denominator; the default 13/13 contract is unchanged.
 
-Fix first: after a defender's card from a class of several, `Game::weight`,
-`Game::moves` and the `Expected` line weigh layouts by the class binomial
-`C(m, k)`, not the posterior given the cards seen, `C(m - sW - sE, k - sW)`
-(`Q83 / T62`, West `J74`, after trick 1: 4,056,234 against 2,704,156 by brute
-force). Root scores are unaffected. `Solver::post` computes the posterior;
-the ignored oracle test `game_weight_counts_the_deals_holding_the_cards_seen`
-becomes a normal test.
+Weights after a defender's card are restricted choice, not a bug. Equal
+cards are interchangeable, so a layout holding `k` of a class's `m` cards
+keeps `C(m, k)` whichever card it showed. Counting only the deals that hold
+the very cards seen (`C(m - sW - sE, k - sW)`, which `Solver::post` computes
+for pruning) erases restricted choice: tried on 2026-10-18, it scored the
+finesse and the drop in `AKT98 / 5432` after East's Q equally (52.2% each,
+against 67.3% and 57.7%), and was reverted. `restricted_choice_in_the_game`
+in [tests/solver.rs](../tests/solver.rs) pins the hand-derived counts. A
+known card breaks its class's symmetry and must become a class of its own;
+derive the fixture's weights by hand first.
 
-**Done:** each option matches independent examples; defaults reproduce
-phase 1; `AQ / 2` solves; unsupported option combinations are rejected clearly.
+**Done:** each option matches independent target examples; defaults
+reproduce phase 1; `AQ / 2` solves; unsupported option combinations,
+including a new option with an expected-tricks goal, are rejected clearly.
 
-### 4. SuitPlay scoring
+### 4. Expected tricks as its own game
 
-Line-versus-line MP and IMP comparison over per-layout outcomes. MP is not
-renamed EV; pairwise preference need not give one dominating line, so return
-the undominated set and represent "no single best line". Take SuitPlay's
-contract and suit-trick inputs and its documented IMP convention. First
-fixtures: `AQ1098 / 5432` (EV vs MP) and `AJ98 / K32` (no best MP line).
+Taking N tricks and taking the most tricks are different games: the defence
+minimizes a different payoff, so an EV plan is a different tree, and EV's
+per-layout trick counts are what MP/IMP scoring compares. Build EV on the
+exact search, not on target lines.
 
-**Done:** published MP/IMP and cyclic cases agree under matching assumptions;
-target/EV fixtures still pass.
+1. Retire the fast `Expected` mode, the EV line assembled from target
+   lines: `line`, `best_line`, `plan_line`, `adopt`, `memo_line`,
+   `Game.reqs` and its CLI, wasm and app paths. `ExactExpected` becomes the
+   one EV goal. Corpus after phase 2, 122 EV runs each: exact p50 4.5 ms,
+   p95 126 ms, max 13.6 s, peak 83 MB; fast p50 32 ms, p95 325 ms, max
+   2.1 s, peak 484 MB, unproven on 26, worst miss 0.091 tricks. Cost: past
+   its budget (only `KJ9753 / -`, at the browser's 10 s) exact EV shows a
+   bound and no line, and the UI says so. This breaks the public API: one
+   commit, with the README updated.
+2. Extend the phase 3 constraints to EV, each with an EV fixture.
+3. SuitPlay scoring: line-versus-line MP and IMP comparison over per-layout
+   outcomes. MP is not renamed EV; pairwise preference need not give one
+   dominating line, so return the undominated set and represent "no single
+   best line". Take SuitPlay's contract and suit-trick inputs and its
+   documented IMP convention. First fixtures: `AQ1098 / 5432` (EV vs MP) and
+   `AJ98 / K32` (no best MP line).
+
+**Done:** no fast-EV code left; EV fixtures pass on the exact search;
+published MP/IMP and cyclic cases agree under matching assumptions; target
+fixtures still pass.
 
 ### 5. Trainer becomes an analysis tool
 
 Reuse `Plan`, `Lead` and the renderer. Add an Analyse view exposing the
-phase 3 constraints and phase 4 scoring: all goals at once, goal switching,
+phase 3 constraints and phase 4 scoring, targets first and EV with its
+scoring in a tab of its own: all goals at once, goal switching,
 a play explorer where the user picks any legal defender reply. Show distinct strategies with per-layout guarantees and a flag when
 enumeration is incomplete, a line comparison table, a trick distribution per
 complete strategy, and shareable URL/JSON (cards, constraints, goal). Generate
@@ -216,8 +241,7 @@ bridge-language summaries from verified trees and keep the tree for audit.
 
 **Done:** reproduce a reference position, inspect the justifying branches,
 compare two lines, share it, without playing a random layout first. The
-distribution evaluates the same policy as the tree. Exact search, now
-seconds at worst, runs before the fast EV line rather than after it.
+distribution evaluates the same policy as the tree.
 
 ### 6. The report
 
@@ -227,8 +251,8 @@ for the measured scope.
 
 ## Next step and exclusions
 
-Phase 3, starting with the posterior weights. This plan changes
-documentation only.
+Phase 3, item 1 (vacant places and known cards) for trick targets. This
+plan changes documentation only.
 
 Not needed: rewrite, server backend, new framework, GPU search, full-deal AI,
 bidding inference. Mixed-strategy equilibria are a separate research question.

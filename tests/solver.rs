@@ -229,3 +229,49 @@ fn errors() {
     );
     assert_eq!(analyze_all(h("AKQ"), h("32")).unwrap().len(), 4);
 }
+
+#[test]
+fn restricted_choice_in_the_game() {
+    // AKT98 / 5432, West J76: after the A, East drops the Q.  Equal cards
+    // are interchangeable, so a layout with k of a class's m cards keeps
+    // weight C(m, k) whichever card it showed: East's honour is twice as
+    // likely singleton (Q or J) as QJ doubleton, and the finesse beats the
+    // drop.  Counting only the deals holding the very Q seen would call
+    // them equal (both 2 * C(22, 11) + C(22, 10) of 2 * C(22, 11) + 2 *
+    // C(22, 10)).
+    let h = |s: &str| s.parse::<Holding>().unwrap();
+    let mut solver = Solver::new(h("AKT98"), h("5432")).unwrap();
+    let mut game = Game::new(&mut solver, h("J76"), Goal::Tricks { target: 5 }).unwrap();
+    let plays: Vec<_> = game
+        .play(&mut solver, "A".parse().unwrap())
+        .unwrap()
+        .iter()
+        .map(|p| (p.seat, p.card.map(|r| r.to_string())))
+        .collect();
+    let card = |s: &str| Some(s.to_string());
+    assert_eq!(
+        plays,
+        [
+            (Seat::North, card("A")),
+            (Seat::East, card("Q")),
+            (Seat::South, card("2")),
+            (Seat::West, card("6")),
+        ]
+    );
+    // East held one honour or both; West at least one of the 7 and 6
+    let one = 4 * binom(22, 11) + 2 * binom(22, 10);
+    let both = 2 * binom(22, 12) + binom(22, 11);
+    assert_eq!(game.weight(&mut solver), one + both);
+    let moves = game.moves(&mut solver);
+    let by = |seat: Seat, cards: &str| {
+        moves
+            .iter()
+            .find(|l| l.seat == seat && l.cards == h(cards))
+            .unwrap()
+            .score
+    };
+    // The finesse wins whenever East held one honour; the K wins against
+    // QJ doubleton or West's Jx
+    assert_eq!(by(Seat::South, "543"), one);
+    assert_eq!(by(Seat::North, "K"), 5 * binom(22, 11));
+}

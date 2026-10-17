@@ -25,7 +25,7 @@ use std::collections::HashMap;
 use std::rc::Rc;
 use std::sync::Mutex;
 use std::sync::atomic::{AtomicUsize, Ordering};
-use suit_combination::{Error, Game, Goal, Solver, TOTAL};
+use suit_combination::{Error, Goal, Solver, TOTAL};
 
 /// Seats by index, as the trick goes round
 const NORTH: usize = 0;
@@ -397,17 +397,6 @@ impl Oracle {
     /// Best score of any of `vs`
     fn best(&self, vs: &[Vector], target: Option<u8>) -> u64 {
         vs.iter().map(|v| self.score(v, target)).max().unwrap_or(0)
-    }
-
-    /// Deals consistent with the defenders having played `shown` (East,
-    /// West) and shown out where `out` says
-    fn deals(&self, shown: [u16; 2], out: [bool; 2]) -> u64 {
-        let p = Pos {
-            played: shown,
-            out,
-            ..self.root()
-        };
-        self.consistent(&p).iter().map(|&i| self.weights[i]).sum()
     }
 }
 
@@ -834,102 +823,4 @@ fn oracle_rules_hooks() {
     };
     let tricks = |entries| Solved::with(a, kq, south_entries(entries)).best(None) / TOTAL;
     assert_eq!((tricks(0), tricks(1)), (1, 2));
-}
-
-/// [`Game::weight`], the denominator of [`Game::moves`]' scores, after every
-/// declarer line of a small combination on every layout, against the deals
-/// that hold the cards the defenders have shown
-#[test]
-#[ignore = "known issue, fixed in phase 3: Game::weight counts class binomials"]
-fn game_weight_counts_the_deals_holding_the_cards_seen() {
-    // Known issue: after a defender shows a card of a multi-card class, the
-    // engine weighs a layout with West holding k of the class's m cards by
-    // the class binomial C(m, k), not by the C(m - sW - sE, k - sW) layouts
-    // holding the sW and sE cards West and East have shown.  For Q83 / T62
-    // with West J74, after South 2, West 7, North 3, East 5 the engine says
-    // 4,056,234 deals; brute force finds 2,704,156.  Root scores are
-    // unaffected; Game::moves' mid-play scores use the same weights.
-    let (north, south) = (holding("Q83"), holding("T62"));
-    let oracle = Oracle::new(north, south, Rules::standard(north, south));
-    let mut solver = Solver::new(north, south).unwrap();
-    let goal = Goal::Tricks { target: 1 };
-    let mut fails = Vec::new();
-
-    // The documented example first
-    let mut game = Game::new(&mut solver, holding("J74"), goal).unwrap();
-    let mut plays = game.play(&mut solver, Rank::new(2)).unwrap();
-    plays.extend(game.play(&mut solver, Rank::new(3)).unwrap());
-    let shown: Vec<_> = plays
-        .iter()
-        .map(|p| (p.seat, p.card.map(Rank::get)))
-        .collect();
-    let expected = [
-        (Seat::South, Some(2)),
-        (Seat::West, Some(7)),
-        (Seat::North, Some(3)),
-        (Seat::East, Some(5)),
-    ];
-    assert_eq!(shown, expected, "the defenders changed their cards");
-    let (engine, deals) = (
-        game.weight(&mut solver),
-        oracle.deals([1 << 5, 1 << 7], [false; 2]),
-    );
-    if engine != deals {
-        fails.push(format!(
-            "West J74, S2 W7 N3 E5: engine {engine}, deals {deals}"
-        ));
-    }
-
-    // Then every declarer line on every layout
-    fn walk(
-        game: Game,
-        seen: ([u16; 2], [bool; 2], String),
-        solver: &mut Solver,
-        oracle: &Oracle,
-        fails: &mut Vec<String>,
-    ) {
-        for lead in game.moves(solver) {
-            let rank = Rank::new(lead.cards.to_bits().trailing_zeros() as u8);
-            let mut game = game.clone();
-            let (mut shown, mut out, mut line) = seen.clone();
-            for p in game.play(solver, rank).unwrap() {
-                let seat = format!("{:?}", p.seat);
-                let card = p.card.map_or("-".into(), |r| r.to_string());
-                line += &format!(" {}{card}", &seat[..1]);
-                let d = match p.seat {
-                    Seat::East => 0,
-                    Seat::West => 1,
-                    _ => continue,
-                };
-                match p.card {
-                    Some(r) => shown[d] |= 1 << r.get(),
-                    None => out[d] = true,
-                }
-            }
-            let (engine, deals) = (game.weight(solver), oracle.deals(shown, out));
-            if engine != deals {
-                fails.push(format!("{line}: engine {engine}, deals {deals}"));
-            }
-            walk(game, (shown, out, line), solver, oracle, fails);
-        }
-    }
-    for &west in &oracle.layouts {
-        let west = Holding::from_bits_truncate(west);
-        let game = Game::new(&mut solver, west, goal).unwrap();
-        let line = format!("West {}:", show(west));
-        walk(
-            game,
-            ([0; 2], [false; 2], line),
-            &mut solver,
-            &oracle,
-            &mut fails,
-        );
-    }
-    let shown = fails
-        .iter()
-        .take(10)
-        .cloned()
-        .collect::<Vec<_>>()
-        .join("\n");
-    assert!(fails.is_empty(), "{} mismatches:\n{shown}", fails.len());
 }
