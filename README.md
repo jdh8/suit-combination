@@ -24,8 +24,8 @@ Assumptions, as in Pavlicek's card-combination tables: unlimited entries to
 both hands, no ruffs, no inference about the enemy hands, only tricks in this
 suit count.  Any number of missing cards: the limit is 256 layouts once
 interchangeable cards merge, which every holding meets (at most 162) and only
-many known cards or an HCP range can break.  For trick targets, `Constraints` set
-other vacant places, cards known to be with East or West, length and HCP
+many known cards or an HCP range can break.  `Constraints` set other vacant
+places, cards known to be with East or West, length and HCP
 ranges, the hand the lead starts in, finite entries, a limit on rounds, a
 fixed first card, discards and ruffs.
 
@@ -61,9 +61,8 @@ cards spent in other suits, out of play but not given to the defenders, as
 SuitPlay's "discards or ruffs".  And ruffs, as SuitC's: the rounds each
 seat may ruff once void in the suit.  A ruff is optional, beats every card of
 the suit and counts as a trick in it; only one side may ruff, as trump ranks
-are not modelled (no overruff).  Only trick targets take them
-(`Error::Unsupported` otherwise), and scores are then out of
-`Analysis::total`, not `TOTAL`.  The CLI takes `--vacant EAST,WEST`,
+are not modelled (no overruff).  Every goal takes them, and scores are
+then out of `Analysis::total`, not `TOTAL`.  The CLI takes `--vacant EAST,WEST`,
 `--east CARDS`, `--west CARDS`, `--length EAST,WEST` and `--hcp EAST,WEST`,
 ranges such as `-,-1` (West at most one card) or `-,1-2`, `--first N|S`
 and `--entries NORTH,SOUTH` such as `-,1` (`-` for unlimited), `--rounds N`,

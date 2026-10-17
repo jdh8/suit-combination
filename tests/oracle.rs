@@ -574,11 +574,9 @@ fn compare(north: Holding, south: Holding, c: Constraints, o: &Solved) -> (Vec<S
     let mut solver = Solver::with_constraints(north, south, c).unwrap();
     let d = c.discards;
     let longer = ((north - d).len().max((south - d).len()) as u8).min(c.rounds);
-    // Only trick targets take constraints
-    let ev = c == Constraints::default();
     let goals = (1..=longer)
         .map(|target| (Goal::Tricks { target }, Some(target)))
-        .chain(ev.then_some((Goal::ExactExpected, None)));
+        .chain([(Goal::ExactExpected, None)]);
     for (goal, target) in goals {
         let a = solver.analyze(goal).unwrap();
         let want = o.best(target);

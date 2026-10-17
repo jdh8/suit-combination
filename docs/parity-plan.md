@@ -33,9 +33,9 @@ targets; double-dummy averages are upper bounds, not policies.
 | Capability | Today ([lib.rs](../src/lib.rs), [tests](../tests/solver.rs), [wasm](../web/src/lib.rs), [app.js](../web/app.js), [CLI](../examples/solve.rs)) | Gap |
 | --- | --- | --- |
 | Hidden-card analysis | Pareto vectors keep one strategy across indistinguishable layouts; targets (0/1 vectors) and `ExactExpected` are exhaustive | Little independent validation |
-| Expected tricks | `ExactExpected`, the exact search, is the one EV goal (the fast target-line mode was retired in phase 4) | No constraints for EV; no MP/IMP |
+| Expected tricks | `ExactExpected`, the exact search, is the one EV goal (the fast target-line mode was retired in phase 4) | No MP/IMP |
 | Probabilities | Fixed 13/13 vacant places, `TOTAL = C(26,13)` hard-coded in engine and browser | No vacant places, known cards, length or HCP constraints |
-| Entries and play | Unlimited entries, no ruffs by default; for trick targets, the starting hand, finite entries, round limits, a fixed first card, discards and one side's ruffs (`Constraints`) | None of these for EV; no overruffs |
+| Entries and play | Unlimited entries, no ruffs by default; the starting hand, finite entries, round limits, a fixed first card, discards and one side's ruffs (`Constraints`) | No overruffs |
 | Alternative lines | Values for every equivalent opening lead; one plan per goal | No line browser, line-by-layout matrix or comparison |
 | Goals | At-least-N, exact EV | No MP/IMP line comparison |
 | Coverage | Any holding: the limit is 256 layouts after merging interchangeable cards (at most 162 for any holding); only many known cards or an HCP range exceed it (`TooManyMissing`) | Over-limit constraint combinations are rejected, not solved |
@@ -337,6 +337,21 @@ random combinations, in 51 of them.  Only the fast line, greedy by
 construction, never did.  Phase 5 decides whether the plan breaks ties
 toward the locally best card or the trainer grades by the plan.
 
+Item 2 done too: every phase 3 constraint takes expected tricks.  The
+exact search needed no change, only the gate (`Solver::check`) lifted:
+its loss bound `cap` stays at least the tricks left under round limits,
+discards and ruffs, so the pruning stays sound.  `analyze_all` and the
+CLI's default include expected tricks under constraints (the CLI's target
+range now also stops at the rounds and discards).  Checked by ten EV
+fixtures, one per option: nine hand derivations, each a line optimal for
+every target at once, so the expected tricks are the sum of the targets'
+optima (vacant places, a known card, HCP, length, first hand and entries,
+rounds, a fixed first card, a discard, a defender's ruff), and the SuitC
+guide's ruff table (`KQT32 / 654`, a ruff each: 1.6300); by the policy
+evaluator on every constrained fixture; and by the oracle sweep, now with
+expected tricks under every random constraint (a mutant off by one deal
+under ruffs fails it).  Defaults byte-identical on 3,000 combinations.
+
 **Done:** no fast-EV code left; EV fixtures pass on the exact search;
 published MP/IMP and cyclic cases agree under matching assumptions; target
 fixtures still pass.
@@ -363,8 +378,7 @@ for the measured scope.
 
 ## Next step and exclusions
 
-Phase 4, item 2: extend the phase 3 constraints to expected tricks, each
-with an EV fixture.
+Phase 4, item 3: SuitPlay's MP and IMP line comparison.
 
 Not needed: rewrite, server backend, new framework, GPU search, full-deal AI,
 bidding inference. Mixed-strategy equilibria are a separate research question.

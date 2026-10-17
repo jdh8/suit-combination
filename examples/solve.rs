@@ -14,7 +14,6 @@
 //! after that many rounds, `--lead` fixes declarer's first card, and
 //! `--discard` takes declarer's cards out of play (not to the defenders).
 //! `--ruffs` gives the rounds each seat may ruff once void, one side only.
-//! Only trick targets take these.
 
 use contract_bridge::{Holding, Rank, Seat};
 use std::time::{Duration, Instant};
@@ -145,7 +144,8 @@ fn main() {
     let mut solver =
         Solver::with_constraints(north, south, constraints).unwrap_or_else(|e| fail(e));
     let total = solver.total();
-    let max = north.len().max(south.len()) as u8;
+    let d = constraints.discards;
+    let max = ((north - d).len().max((south - d).len()) as u8).min(constraints.rounds);
     let goals = match rest {
         [t] if t == "ev" => vec![Goal::ExactExpected],
         [t] => vec![Goal::Tricks {
@@ -153,7 +153,7 @@ fn main() {
         }],
         [] => (1..=max)
             .map(|target| Goal::Tricks { target })
-            .chain((constraints == Constraints::default()).then_some(Goal::ExactExpected))
+            .chain([Goal::ExactExpected])
             .collect(),
         _ => fail(USAGE),
     };

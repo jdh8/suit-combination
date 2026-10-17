@@ -293,12 +293,8 @@ fn constraint_errors() {
     assert_eq!(error(solver([13, 1], "", "KJ")), Some(Error::NoLayout));
 
     let mut s = solver([13, 7], "", "K").unwrap();
-    assert_eq!(
-        s.analyze(Goal::ExactExpected).unwrap_err(),
-        Error::Unsupported
-    );
-    // Every target, and no expected tricks
-    assert_eq!(s.analyze_all().unwrap().len(), 3);
+    // Every target, then expected tricks
+    assert_eq!(s.analyze_all().unwrap().len(), 4);
     let t = Goal::Tricks { target: 2 };
     assert_eq!(Game::new(&mut s, h("J"), t).unwrap_err(), Error::BadWest);
     // More cards than West's places
@@ -360,7 +356,7 @@ fn errors_of_play_constraints() {
     );
     // Targets stop at the rounds
     let mut s = solver(Constraints { rounds: 1, ..d }).unwrap();
-    assert_eq!(s.analyze_all().unwrap().len(), 1);
+    assert_eq!(s.analyze_all().unwrap().len(), 2);
     let t = Goal::Tricks { target: 2 };
     assert_eq!(s.analyze(t).unwrap_err(), Error::BadTarget);
     // Games cannot show a ruff

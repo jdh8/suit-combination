@@ -93,8 +93,7 @@ pub enum Error {
     BadConstraints,
     /// No layout fits the [`Constraints`]
     NoLayout,
-    /// The goal does not take [`Constraints`] yet (only trick targets do),
-    /// both sides may ruff, or a [`Game`] has ruffs
+    /// Both sides may ruff, or a [`Game`] has ruffs
     Unsupported,
 }
 
@@ -113,9 +112,7 @@ impl fmt::Display for Error {
                  the first lead"
             }
             Self::NoLayout => "no layout fits the constraints",
-            Self::Unsupported => {
-                "only trick targets take constraints, only one side may ruff, and games take no ruffs"
-            }
+            Self::Unsupported => "only one side may ruff, and games take no ruffs",
             Self::Interrupted { bound, total } => {
                 let bound = *bound as f64 / *total as f64;
                 return write!(f, "search interrupted; the best is at most {bound:.4}");
@@ -972,8 +969,7 @@ impl Solver {
         Self::with_constraints(north, south, Constraints::default())
     }
 
-    /// A solver for `north` opposite `south` under `constraints`, which only
-    /// trick targets take ([`Error::Unsupported`] otherwise)
+    /// A solver for `north` opposite `south` under `constraints`
     pub fn with_constraints(
         north: Holding,
         south: Holding,
@@ -1128,8 +1124,6 @@ impl Solver {
             Goal::Tricks { target } if target == 0 || target > self.max_tricks() => {
                 Err(Error::BadTarget)
             }
-            Goal::Tricks { .. } => Ok(()),
-            _ if self.constraints != Constraints::default() => Err(Error::Unsupported),
             _ => Ok(()),
         }
     }
@@ -1253,13 +1247,12 @@ impl Solver {
     }
 
     /// [`Analysis`] for every target from one trick up to the longer hand's
-    /// length, then for [`Goal::ExactExpected`] unless there are
-    /// [`Constraints`]; the first goal interrupted ends it
+    /// length, then for [`Goal::ExactExpected`]; the first goal
+    /// interrupted ends it
     pub fn analyze_all(&mut self) -> Result<Vec<Analysis>, Error> {
-        let ev = self.constraints == Constraints::default();
         (1..=self.max_tricks())
             .map(|target| Goal::Tricks { target })
-            .chain(ev.then_some(Goal::ExactExpected))
+            .chain([Goal::ExactExpected])
             .map(|goal| self.analyze(goal))
             .collect()
     }
