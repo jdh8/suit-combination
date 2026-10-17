@@ -9,7 +9,8 @@
 //! <code>[TOTAL] = C(26, 13)</code>.  [`Constraints`] set other vacant
 //! places, cards known to be with East or West, and ranges of each
 //! defender's length and high-card points in the suit; scores are then out
-//! of [`Analysis::total`].
+//! of [`Analysis::total`].  They also set which hand leads first and how
+//! many entries each hand has outside the suit.
 //!
 //! The search is exact.  Instead of a greedy per-branch value — which is *not*
 //! optimal here, because a falsecarding defender spreads one layout's weight
@@ -43,8 +44,11 @@
 //! constrained, as which honours a defender holds is no longer symmetric.
 //!
 //! Assumptions (the usual ones, as in Pavlicek's card-combination tables):
-//! unlimited entries to both hands, no ruffs, no inference about the enemy
-//! hands beyond [`Constraints`], and only tricks won in this suit count.
+//! unlimited entries to both hands unless [`Constraints::entries`] says
+//! otherwise, no ruffs, no inference about the enemy hands beyond
+//! [`Constraints`], and only tricks won in this suit count.  The defenders
+//! never lead the suit: after winning a round they switch, and declarer
+//! comes back by an entry.
 
 use contract_bridge::{Holding, Rank, Seat};
 use std::collections::HashMap;
@@ -75,8 +79,9 @@ pub enum Error {
     /// no line scores more than `bound` (out of `total`, as
     /// [`Analysis::score`])
     Interrupted { bound: u64, total: u64 },
-    /// Known cards that are not missing or are with both defenders, or more
-    /// than 13 vacant places
+    /// Known cards that are not missing or are with both defenders, more
+    /// than 13 vacant places, a first leader not North or South, or no hand
+    /// able to lead the first round
     BadConstraints,
     /// No layout fits the [`Constraints`]
     NoLayout,
@@ -93,7 +98,8 @@ impl fmt::Display for Error {
             Self::BadWest => "West holds a card of North or South",
             Self::NotPlayable => "that card cannot be played now",
             Self::BadConstraints => {
-                "known cards must be missing and with one defender; at most 13 vacant places"
+                "known cards must be missing and with one defender; at most 13 vacant places; \
+                 North or South, holding a card, must be able to lead first"
             }
             Self::NoLayout => "no layout fits the constraints",
             Self::Unsupported => "only trick targets take constraints",
@@ -207,6 +213,13 @@ pub struct Constraints {
     /// Fewest and most high-card points (A 4, K 3, Q 2, J 1) East, West hold
     /// in this suit; the other suits are not modelled
     pub hcp: [[u8; 2]; 2],
+    /// Hand that must lead the first round, North or South; `None`: either
+    pub first: Option<Seat>,
+    /// Entries to North, South in other suits; `None`: unlimited.  A hand
+    /// leads free if it won the last round of the suit, or leads the first
+    /// round as [`first`](Self::first); otherwise leading from it takes an
+    /// entry.  After a defender wins a round, either hand needs one.
+    pub entries: [Option<u8>; 2],
 }
 
 impl Default for Constraints {
@@ -216,6 +229,8 @@ impl Default for Constraints {
             known: [Holding::EMPTY; 2],
             length: [[0, 13]; 2],
             hcp: [[0, 10]; 2],
+            first: None,
+            entries: [None; 2],
         }
     }
 }
@@ -555,9 +570,32 @@ struct State {
     /// a defender's card is its class's lowest rank
     trick: [u8; 4],
     played: u8,
+    /// Between tricks, the hands that may lead without an entry (bit 0
+    /// North, bit 1 South), plus [`BARRED`] if no other hand may; 0 in a trick
+    lead: u8,
+    /// Entries left to North, South; [`UNLIMITED`] never runs out
+    entries: [u8; 2],
 }
 
+/// [`State::lead`]: only the hands named may lead (the forced first leader)
+const BARRED: u8 = 4;
+
+/// [`State::entries`] of a hand with unlimited entries
+const UNLIMITED: u8 = u8::MAX;
+
 impl State {
+    /// Between tricks, hand `h` (0 North, 1 South) has a card and may lead
+    /// it: free, or by an entry
+    fn may_lead(&self, h: usize) -> bool {
+        self.ns[h] != 0
+            && (self.lead >> h & 1 != 0 || self.lead & BARRED == 0 && self.entries[h] > 0)
+    }
+
+    /// Between tricks and no hand may lead: the suit is over for declarer
+    fn is_over(&self) -> bool {
+        self.played == 0 && !self.may_lead(0) && !self.may_lead(1)
+    }
+
     /// Declarer cards still able to separate missing cards: in hand or on the table
     fn live(&self) -> u16 {
         let mut live = self.ns[0] | self.ns[1];
@@ -919,6 +957,7 @@ impl Solver {
         if (east | west) & !missing != 0
             || east & west != 0
             || constraints.vacant.iter().any(|&v| v > 13)
+            || !matches!(constraints.first, None | Some(Seat::North | Seat::South))
         {
             return Err(Error::BadConstraints);
         }
@@ -941,6 +980,9 @@ impl Solver {
             interrupted: false,
             dd: None,
         };
+        if solver.root().is_over() {
+            return Err(Error::BadConstraints);
+        }
         if solver.total() == 0 {
             return Err(Error::NoLayout);
         }
@@ -1043,6 +1085,8 @@ impl Solver {
     }
 
     fn root(&self) -> State {
+        let entries = self.constraints.entries.map(|e| e.unwrap_or(UNLIMITED));
+        let unlimited = u8::from(entries[0] == UNLIMITED) | u8::from(entries[1] == UNLIMITED) << 1;
         State {
             ns: [self.north.to_bits(), self.south.to_bits()],
             shown: [[0; MAX_MISSING]; 2],
@@ -1050,6 +1094,12 @@ impl Solver {
             leader: NORTH,
             trick: [0; 4],
             played: 0,
+            lead: match self.constraints.first {
+                Some(Seat::North) => 1 | BARRED,
+                Some(Seat::South) => 2 | BARRED,
+                _ => unlimited,
+            },
+            entries,
         }
     }
 
@@ -1365,7 +1415,12 @@ impl Solver {
             .enumerate()
             .max_by_key(|&(_, &r)| r)
             .unwrap();
-        let won = (st.leader + pos as u8).is_multiple_of(2);
+        let winner = (st.leader + pos as u8) % 4;
+        let won = winner.is_multiple_of(2);
+        // A hand with unlimited entries always leads free
+        st.lead = st.entries.iter().enumerate().fold(0, |acc, (h, &e)| {
+            acc | u8::from(e == UNLIMITED || won && usize::from(winner / 2) == h) << h
+        });
         st.trick = [0; 4];
         st.played = 0;
         st.leader = NORTH;
@@ -1388,15 +1443,21 @@ impl Solver {
     fn declarer_play(&mut self, st: &State, s: &Structure, at: u8, rank: u8) -> State {
         let mut ch = *st;
         if st.played == 0 {
+            let h = usize::from(at / 2);
+            if st.lead >> h & 1 == 0 && st.entries[h] != UNLIMITED {
+                ch.entries[h] -= 1;
+            }
             ch.leader = at;
+            ch.lead = 0;
         }
         ch.ns[at as usize / 2] &= !(1 << rank);
         self.advance(ch, s, rank).0
     }
 
     /// Declarer's options now: (resulting state, seat, equivalence class
-    /// played).  Between tricks that includes the choice of hand; at third
-    /// hand a void hand has the single option "discard" (class 0).
+    /// played).  Between tricks that includes the choice of hand, among
+    /// those [`State::may_lead`]; at third hand a void hand has the single
+    /// option "discard" (class 0).
     fn declarer_moves(&mut self, st: &State, s: &Structure) -> Vec<(State, u8, u16)> {
         let mut out = Vec::new();
         let seats: &[u8] = if st.played == 0 {
@@ -1405,6 +1466,9 @@ impl Solver {
             &[(st.leader + st.played) % 4]
         };
         for &at in seats {
+            if st.played == 0 && !st.may_lead(usize::from(at / 2)) {
+                continue;
+            }
             let hand = st.ns[at as usize / 2];
             if hand == 0 {
                 if st.played != 0 {
@@ -1490,7 +1554,7 @@ impl Solver {
             beam => beam,
         };
         let mut kept = true;
-        let out = if st.played == 0 && st.ns == [0; 2] {
+        let out = if st.is_over() {
             vec![Tricks::ZERO]
         } else if Self::is_declarer_turn(&st) {
             let mut all = Vec::new();
@@ -1821,8 +1885,9 @@ impl Game {
         self.won
     }
 
+    /// The suit is played out, or declarer may not lead it again
     pub fn is_over(&self) -> bool {
-        self.st.played == 0 && self.st.ns == [0; 2]
+        self.st.is_over()
     }
 
     /// Weight (out of [`TOTAL`]) of the layouts consistent with what declarer
@@ -2040,7 +2105,7 @@ impl Solver {
         }
         let remaining =
             st.ns[0].count_ones().max(st.ns[1].count_ones()) as u8 + u8::from(st.played > 0);
-        if need > remaining {
+        if need > remaining || st.is_over() {
             return (vec![Set::EMPTY], true);
         }
         match (self.memo_t.get(&(st, need)), cut) {

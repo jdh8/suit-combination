@@ -73,10 +73,36 @@ impl Rules {
         }
     }
 
-    /// [`standard`](Self::standard) with layouts weighted under `c`
+    /// [`standard`](Self::standard) with layouts weighted under `c`, and
+    /// its first leader and entries
     fn constrained(north: Holding, south: Holding, c: Constraints) -> Self {
         let missing = DECK & !north.to_bits() & !south.to_bits();
+        // Entry state: entries left to North in the low four bits, South in
+        // the high four, 15 for unlimited
+        let first = c.first.map(seat_index);
+        let access = move |winner: Option<usize>, e: u8| {
+            [NORTH, SOUTH].map(|hand| {
+                let shift = 2 * hand; // 0 for North, 4 for South
+                let left = e >> shift & 15;
+                let free = match winner {
+                    None => first == Some(hand),
+                    Some(w) => w == hand,
+                };
+                if free {
+                    Some(e)
+                } else if winner.is_none() && first.is_some() {
+                    None
+                } else if left == 15 {
+                    Some(e)
+                } else {
+                    left.checked_sub(1).map(|l| e & !(15 << shift) | l << shift)
+                }
+            })
+        };
+        let nibble = |n: Option<u8>| n.map_or(15, |n| n.min(14));
         Self {
+            access: Box::new(access),
+            entries: nibble(c.entries[0]) | nibble(c.entries[1]) << 4,
             weight: Box::new(move |west| constrained(missing, west, c)),
             ..Self::standard(north, south)
         }
@@ -630,6 +656,15 @@ fn check_all(
                     let c = constrain(n, s);
                     let mut oracle = Oracle::new(n, s, Rules::constrained(n, s, c));
                     oracle.limit = limit;
+                    if oracle.declarer_moves(&oracle.root()).is_empty() {
+                        // No hand can lead: the engine must reject the problem
+                        let mut r = results.lock().unwrap();
+                        r.1 += 1;
+                        if Solver::with_constraints(n, s, c).err() != Some(Error::BadConstraints) {
+                            r.0.push(format!("{} {c:?}: engine accepts no lead", name(n, s)));
+                        }
+                        continue;
+                    }
                     if oracle.layouts.is_empty() {
                         // No layout fits: the engine must say so
                         let mut r = results.lock().unwrap();
@@ -679,8 +714,9 @@ fn oracle_agrees_on_random_small_combinations() {
 
 /// Random vacant places from 4 to 13; for each missing card, one chance in
 /// three that it is known to be with East or West; even chances of a random
-/// length range and of a random HCP range for one defender; seeded by the
-/// combination; sometimes no layout fits
+/// length range and of a random HCP range for one defender; a random first
+/// leader or none, and for each declarer hand even chances of 0 to 2
+/// entries; seeded by the combination; sometimes no layout fits
 fn random_constraints(north: Holding, south: Holding) -> Constraints {
     let mut x = u64::from(north.to_bits()) << 16 | u64::from(south.to_bits()) | 1 << 40;
     let mut rand = move || {
@@ -716,6 +752,12 @@ fn random_constraints(north: Holding, south: Holding) -> Constraints {
             let lo = rand() % (most + 1);
             let hi = lo + rand() % (most + 1 - lo);
             ranges[(rand() % 2) as usize] = [lo as u8, hi as u8];
+        }
+    }
+    c.first = [None, Some(Seat::North), Some(Seat::South)][(rand() % 3) as usize];
+    for e in &mut c.entries {
+        if rand() % 2 == 0 {
+            *e = Some((rand() % 3) as u8);
         }
     }
     c
@@ -761,6 +803,8 @@ fn oracle_agrees_on_reference_cases() {
         west: Option<String>,
         length: Option<[[u8; 2]; 2]>,
         hcp: Option<[[u8; 2]; 2]>,
+        first: Option<String>,
+        entries: Option<[Option<u8>; 2]>,
         score: Option<u64>,
         value: Option<f64>,
         tolerance: Option<f64>,
@@ -778,6 +822,11 @@ fn oracle_agrees_on_reference_cases() {
             known: [known(&c.east), known(&c.west)],
             length: c.length.unwrap_or(d.length),
             hcp: c.hcp.unwrap_or(d.hcp),
+            first: c.first.as_deref().map(|s| match s {
+                "N" => Seat::North,
+                _ => Seat::South,
+            }),
+            entries: c.entries.unwrap_or(d.entries),
         };
         let combo = (holding(&c.north), holding(&c.south), constraints);
         if 13 - combo.0.len() - combo.1.len() > 8 {

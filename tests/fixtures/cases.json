@@ -235,5 +235,40 @@
     "north": "AKT98", "south": "5432", "goal": 5, "hcp": [[0, 10], [1, 2]], "score": 4115020, "total": 5408312,
     "source": "Hand derivation: 1-2 HCP gives West exactly one of Q, J. The A, then the finesse if East dropped an honour, else the K, wins every 2-2 (2 x 2 C(22, 11)) and East's singleton honour (2 C(22, 10)); West's singleton honour opposite East's H76 always takes a trick. Total 2 (C(22, 12) + 2 C(22, 11) + C(22, 10))",
     "checked": "2026-10-18", "note": "HCP no known card can express: the honours split one each, either way"
+  },
+  {
+    "north": "AQJT", "south": "32", "goal": 4, "score": 1889550, "leads": ["2"], "avoid": ["A"],
+    "source": "Hand derivation: finesse twice from South, then the A drops the K; wins West's K, Kx, Kxx: C(19, 12) + 6 C(19, 11) + 15 C(19, 10). Rising with the A instead wins only East's singleton K",
+    "checked": "2026-10-18", "note": "Baseline for the entry cases below"
+  },
+  {
+    "north": "AQJT", "south": "32", "goal": 4, "entries": [null, 1], "score": 503880, "leads": ["2"], "avoid": ["A"],
+    "source": "Hand derivation: one lead from South (South never wins a trick, so every lead from it spends an entry): finesse, then the A drops West's Kx; wins West's K, Kx: C(19, 12) + 6 C(19, 11). The A first drops only a singleton K: C(19, 12) + C(19, 7) = 100776",
+    "checked": "2026-10-18", "note": "SuitPlay's entry rule, with the limited hand in South"
+  },
+  {
+    "north": "AQJT", "south": "32", "goal": 4, "entries": [null, 0], "score": 100776, "leads": ["A"],
+    "source": "Hand derivation: no lead from South; the A drops a singleton K on either side: C(19, 12) + C(19, 7)",
+    "checked": "2026-10-18"
+  },
+  {
+    "north": "AQJT", "south": "32", "goal": 4, "first": "N", "entries": [null, 1], "score": 100776, "leads": ["A"],
+    "source": "Hand derivation: North must lead first; the A drops a singleton K (C(19, 12) + C(19, 7)), after which one finesse cannot pick up West's Kx, and a lower honour led loses to the K",
+    "checked": "2026-10-18", "note": "The forced first lead costs the finesse that the free entry case gets"
+  },
+  {
+    "north": "AQJT", "south": "32", "goal": 4, "first": "S", "entries": [null, 0], "score": 503880, "leads": ["2"],
+    "source": "Hand derivation: South's forced first lead is free and its only one: the finesse, then the A, wins West's K, Kx: C(19, 12) + 6 C(19, 11)",
+    "checked": "2026-10-18"
+  },
+  {
+    "north": "AKQ2", "south": "J", "goal": 4, "first": "N", "entries": [0, 0], "score": 0,
+    "source": "Hand derivation: the 2 to the J strands declarer in a void South; a top card first crashes the J, and the 2 then loses",
+    "checked": "2026-10-18", "note": "A blocked suit"
+  },
+  {
+    "north": "AKQ2", "south": "J", "goal": 4, "first": "N", "entries": [1, 0], "score": 10400600, "leads": ["2"], "avoid": ["A"],
+    "source": "Hand derivation: the 2 to the J, then North's one outside entry for the A, K, Q",
+    "checked": "2026-10-18", "note": "Unblocking with one entry"
   }
 ]

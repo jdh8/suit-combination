@@ -28,6 +28,10 @@ struct Case {
     length: Option<[[u8; 2]; 2]>,
     /// Fewest and most HCP of East, West in this suit
     hcp: Option<[[u8; 2]; 2]>,
+    /// Hand that must lead first, "N" or "S"
+    first: Option<String>,
+    /// Outside entries to North, South; null = unlimited
+    entries: Option<[Option<u8>; 2]>,
     score: Option<u64>,
     /// The constrained denominator; [`TOTAL`] if absent
     total: Option<u64>,
@@ -56,6 +60,12 @@ impl Case {
             known: [known(&self.east), known(&self.west)],
             length: self.length.unwrap_or(d.length),
             hcp: self.hcp.unwrap_or(d.hcp),
+            first: self.first.as_deref().map(|s| match s {
+                "N" => Seat::North,
+                "S" => Seat::South,
+                _ => panic!("first: {s}?"),
+            }),
+            entries: self.entries.unwrap_or(d.entries),
         }
     }
 }
@@ -81,9 +91,28 @@ struct Pos {
     trick: [u8; 4],
     played: usize,
     won: u8,
+    /// Hands that may lead the next trick without an entry: the one that
+    /// won the last trick, or the forced first leader
+    free: [bool; 2],
+    /// Only a free hand may lead (the first trick's forced leader)
+    barred: bool,
+    /// Outside entries left to North, South; `None` = unlimited
+    entries: [Option<u8>; 2],
 }
 
 impl Pos {
+    /// Declarer's hand `h` (0 North, 1 South) leads, spending an entry
+    /// unless it may lead free
+    fn lead(&mut self, h: usize) {
+        if !self.free[h] {
+            assert!(!self.barred, "the other hand must lead first");
+            if let Some(e) = &mut self.entries[h] {
+                *e = e.checked_sub(1).expect("no entry left");
+            }
+        }
+        self.barred = false;
+    }
+
     /// Seat `at` plays `rank` (0 = discards or shows out)
     fn play(mut self, at: usize, rank: u8) -> Self {
         assert_eq!((self.leader + self.played) % 4, at, "out of turn");
@@ -92,7 +121,9 @@ impl Pos {
         self.played += 1;
         if self.played == 4 {
             let winner = (0..4).max_by_key(|&p| self.trick[p]).unwrap();
-            self.won += u8::from((self.leader + winner).is_multiple_of(2));
+            let seat = (self.leader + winner) % 4;
+            self.won += u8::from(seat.is_multiple_of(2));
+            self.free = [seat == 0, seat == 2];
             self.trick = [0; 4];
             self.played = 0;
         }
@@ -109,6 +140,7 @@ fn follow(plan: &Plan, mut p: Pos) -> u8 {
             let at = seat_index(*seat);
             if p.played == 0 {
                 p.leader = at;
+                p.lead(at / 2);
             }
             let choice = cards.to_bits() & p.hands[at];
             let rank = if choice == 0 {
@@ -180,6 +212,9 @@ fn evaluate(a: &Analysis, c: &Constraints) -> u64 {
             trick: [0; 4],
             played: 0,
             won: 0,
+            free: [c.first == Some(Seat::North), c.first == Some(Seat::South)],
+            barred: c.first.is_some(),
+            entries: c.entries,
         };
         let weight = weight(missing, west, c);
         let tricks = if weight == 0 { 0 } else { follow(&a.plan, p) };

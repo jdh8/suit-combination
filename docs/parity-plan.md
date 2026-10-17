@@ -35,7 +35,7 @@ targets; double-dummy averages are upper bounds, not policies.
 | Hidden-card analysis | Pareto vectors keep one strategy across indistinguishable layouts; targets (0/1 vectors) and `ExactExpected` are exhaustive | Little independent validation |
 | Expected tricks | `Expected` = combination of target lines plus an upper bound; exact mode separate | Fast EV is not always optimal (`A8 / JT62`: 1.644 vs 1.651) |
 | Probabilities | Fixed 13/13 vacant places, `TOTAL = C(26,13)` hard-coded in engine and browser | No vacant places, known cards, length or HCP constraints |
-| Entries and play | Either hand may lead each round (`declarer_moves`); `advance` resets the leader; no ruffs | No finite entries, forced leader, limited rounds, ruffs |
+| Entries and play | Unlimited entries by default; for trick targets, a forced first leader and finite entries per hand (`Constraints::first`, `Constraints::entries`); no ruffs | No limited rounds, fixed plays, ruffs; no entries for EV |
 | Alternative lines | Values for every equivalent opening lead; one plan per goal | No line browser, line-by-layout matrix or comparison |
 | Goals | At-least-N, bounded EV, exact EV | No MP/IMP line comparison |
 | Coverage | At most eight missing cards (`TooManyMissing`) | `AQ / 2` is rejected |
@@ -220,6 +220,24 @@ with honour splitting or the length filter removed. Defaults byte-identical
 again on 3,000 combinations and 400 exact. Not yet: the wasm and UI
 surfaces (phase 5).
 
+A forced first leader and finite entries are in too (`Constraints::first`,
+`Constraints::entries`, CLI `--first`/`--entries`). The rule is SuitPlay's,
+for both hands: a hand leads free if it won the last round of the suit, or
+leads the first round as the forced leader; otherwise the lead takes one of
+its entries. After a defender wins a round they switch suits, so either
+hand needs an entry. A problem with no legal first lead (a void forced
+leader, no entries anywhere) is `BadConstraints`. `State` carries the hands
+that lead free and the entries left; with unlimited entries both stay
+constant, so defaults search the same states. Checked by seven
+hand-derived fixtures (`AQJT / 32` for four tricks: 18.17% free, 4.84%
+with one entry to South, 0.97% with none or when North must lead first;
+`AKQ2 / J` blocked, unblocked by one North entry), the evaluator, which
+now enforces the entry rule itself, and the oracle sweep with a random
+first leader and 0-2 entries per hand; the sweep fails with entries never
+spent, a free lead after a defender's trick, or the first leader not
+forced. Defaults byte-identical on 3,000 combinations and 400 exact, at the
+same speed.
+
 **Done:** each option matches independent target examples; defaults
 reproduce phase 1; `AQ / 2` solves; unsupported option combinations,
 including a new option with an expected-tricks goal, are rejected clearly.
@@ -274,7 +292,8 @@ for the measured scope.
 
 ## Next step and exclusions
 
-Phase 3, item 1 continued: length and HCP restrictions for trick targets.
+Phase 3, item 3: fixed first plays, finite rounds, specified discards and
+ruffs for trick targets.
 
 Not needed: rewrite, server backend, new framework, GPU search, full-deal AI,
 bidding inference. Mixed-strategy equilibria are a separate research question.

@@ -1,16 +1,18 @@
 //! `cargo run --release --example solve -- AJ52 K76 [TARGET|ev|exact] [--budget SECS]
 //! [--vacant EAST,WEST] [--east CARDS] [--west CARDS] [--length EAST,WEST]
-//! [--hcp EAST,WEST]`
+//! [--hcp EAST,WEST] [--first N|S] [--entries NORTH,SOUTH]`
 //!
 //! Prints the value of every goal (or just the one given) with its status,
 //! and the line for the goal shown last.  `--budget` gives each goal at most
 //! that many seconds; a goal out of time shows only its bound.  `--vacant`
 //! sets the defenders' vacant places, `--east` and `--west` the cards known
 //! to be with them, `--length` and `--hcp` (this suit only) ranges such as
-//! `3`, `2-4`, `-2`, `3-` or `-` for any, e.g. `--length -,-1`; only trick
-//! targets take these.
+//! `3`, `2-4`, `-2`, `3-` or `-` for any, e.g. `--length -,-1`.  `--first`
+//! names the hand that must lead first, `--entries` each hand's entries in
+//! other suits, `-` for unlimited, e.g. `--entries -,1`.  Only trick targets
+//! take these.
 
-use contract_bridge::Holding;
+use contract_bridge::{Holding, Seat};
 use std::time::{Duration, Instant};
 use suit_combination::{Constraints, Error, Goal, Solver};
 
@@ -31,7 +33,8 @@ fn holding(seat: &str, s: &str) -> Holding {
 }
 
 const USAGE: &str = "usage: solve NORTH SOUTH [TARGET|ev|exact] [--budget SECS] \
-    [--vacant EAST,WEST] [--east CARDS] [--west CARDS] [--length EAST,WEST] [--hcp EAST,WEST]";
+    [--vacant EAST,WEST] [--east CARDS] [--west CARDS] [--length EAST,WEST] [--hcp EAST,WEST] \
+    [--first N|S] [--entries NORTH,SOUTH]";
 
 /// Removes `--flag VALUE` from `args`, returning the value
 fn flag(args: &mut Vec<String>, name: &str) -> Option<String> {
@@ -91,6 +94,25 @@ fn main() {
     }
     if let Some(v) = flag(&mut args, "--hcp") {
         constraints.hcp = ranges("--hcp", &v, d.hcp[0]);
+    }
+    if let Some(v) = flag(&mut args, "--first") {
+        constraints.first = Some(match v.as_str() {
+            "N" => Seat::North,
+            "S" => Seat::South,
+            _ => fail("--first: N or S expected"),
+        });
+    }
+    if let Some(v) = flag(&mut args, "--entries") {
+        let hand = |e: &str| {
+            (e == "-")
+                .then_some(None)
+                .or_else(|| e.parse().ok().map(Some))
+        };
+        let entries: Option<Vec<_>> = v.split(',').map(hand).collect();
+        let Some(&[north, south]) = entries.as_deref() else {
+            fail("--entries: NORTH,SOUTH expected, e.g. -,1");
+        };
+        constraints.entries = [north, south];
     }
     let [north, south, rest @ ..] = args.as_slice() else {
         fail(USAGE);

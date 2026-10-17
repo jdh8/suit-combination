@@ -27,8 +27,8 @@ which is exact but can take seconds.
 Assumptions, as in Pavlicek's card-combination tables: unlimited entries to
 both hands, no ruffs, no inference about the enemy hands, only tricks in this
 suit count.  Up to 8 missing cards.  For trick targets, `Constraints` set
-other vacant places, cards known to be with East or West, and length and
-HCP ranges.
+other vacant places, cards known to be with East or West, length and HCP
+ranges, the hand that leads first and finite entries.
 
 ## Library
 
@@ -51,11 +51,16 @@ plays one and lets the engine's defenders answer.  The `serde` feature derives
 `Solver::with_constraints` takes `Constraints`: the defenders' vacant places
 (13 less the cards known in their other suits), the cards of this suit
 known to be with each, and ranges of each one's length and high-card points
-in this suit (not the whole hand).  Only trick targets take them
+in this suit (not the whole hand), the hand that must lead first, and
+entries to North and South in other suits.  A hand leads free after winning
+the last round of the suit, or as the first leader; otherwise the lead takes
+one of its entries, as in SuitPlay (the defenders, after winning a round,
+switch suits).  Only trick targets take them
 (`Error::Unsupported` otherwise), and scores are then out of
 `Analysis::total`, not `TOTAL`.  The CLI takes `--vacant EAST,WEST`,
 `--east CARDS`, `--west CARDS`, `--length EAST,WEST` and `--hcp EAST,WEST`,
-ranges such as `-,-1` (West at most one card) or `-,1-2`.
+ranges such as `-,-1` (West at most one card) or `-,1-2`, `--first N|S`
+and `--entries NORTH,SOUTH` such as `-,1` (`-` for unlimited).
 
 Every `Analysis` says whether it is `proven`: its `score` equals its `bound`,
 so no line does better.  Only a `Goal::Expected` line can fall short; the
