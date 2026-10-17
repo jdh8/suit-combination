@@ -36,6 +36,9 @@ const WEST: usize = 3;
 /// Ranks 2 to A as bits 2 to 14, like [`Holding::to_bits`]
 const DECK: u16 = 0x7FFC;
 
+/// A ruff in [`Pos::trick`]: it beats every card of the suit
+const RUFF: u8 = 15;
+
 /// Tricks declarer wins per layout still consistent with what declarer has
 /// seen, in the order of [`Oracle::layouts`]
 type Vector = Vec<u8>;
@@ -59,6 +62,8 @@ struct Rules {
     lead: Option<u8>,
     /// Declarer's cards kept out of play, and out of the defenders' hands
     discards: u16,
+    /// Rounds each seat may ruff once void
+    ruffs: [u8; 4],
     /// Weight of the layout in which West holds exactly these cards (bit
     /// `r` = rank `r`); 0 rules the layout out
     weight: Box<dyn Fn(u16) -> u64>,
@@ -75,6 +80,7 @@ impl Rules {
             rounds: 13,
             lead: None,
             discards: 0,
+            ruffs: [0; 4],
             weight: Box::new(move |west| vacant_places(missing, west)),
         }
     }
@@ -108,6 +114,7 @@ impl Rules {
             rounds: c.rounds,
             lead: c.lead.map(Rank::get),
             discards: c.discards.to_bits(),
+            ruffs: c.ruffs,
             weight: Box::new(move |west| constrained(missing, west, c)),
         }
     }
@@ -174,6 +181,8 @@ struct Pos {
     entries: u8,
     /// Tricks completed
     round: u8,
+    /// Ruffs left by seat
+    ruffs: [u8; 4],
 }
 
 /// Index into `hands` of a declarer seat, into `played` of a defender's
@@ -298,6 +307,7 @@ impl Oracle {
             access: (self.rules.access)(None, self.rules.entries),
             entries: 0,
             round: 0,
+            ruffs: self.rules.ruffs,
         }
     }
 
@@ -310,7 +320,12 @@ impl Oracle {
             p.access = [None; 2];
         }
         assert_eq!(seat, (p.leader + p.count) % 4, "out of turn");
-        if seat.is_multiple_of(2) {
+        if rank == RUFF {
+            p.ruffs[seat] -= 1;
+            if !seat.is_multiple_of(2) {
+                p.out[side(seat)] = true;
+            }
+        } else if seat.is_multiple_of(2) {
             p.hands[side(seat)] &= !(1 << rank);
         } else if rank == 0 {
             p.out[side(seat)] = true;
@@ -349,6 +364,9 @@ impl Oracle {
             let hand = p.hands[side(seat)];
             if hand == 0 && p.count != 0 {
                 out.push((seat, 0, self.play(*p, seat, 0).0));
+                if p.ruffs[seat] > 0 {
+                    out.push((seat, RUFF, self.play(*p, seat, RUFF).0));
+                }
             }
             for r in cards(hand) {
                 let fixed = p.round == 0 && p.count == 0 && self.rules.lead.is_some();
@@ -400,7 +418,7 @@ impl Oracle {
         let unplayed = self.missing() & !p.played[0] & !p.played[1];
         // (our lanes where the card is legal, tricks it wins, child's antichain)
         let mut branches = Vec::new();
-        for rank in cards(unplayed).chain([0]) {
+        for rank in cards(unplayed).chain([0, RUFF]) {
             // Exactly the child's lanes, in the same order
             let legal: Vec<usize> = (0..consistent.len())
                 .filter(|&j| {
@@ -408,6 +426,8 @@ impl Oracle {
                     let held = self.dealt(seat, west) & !p.played[side(seat)];
                     if rank == 0 {
                         held == 0
+                    } else if rank == RUFF {
+                        held == 0 && p.ruffs[seat] > 0
                     } else {
                         held >> rank & 1 != 0
                     }
@@ -735,8 +755,9 @@ fn oracle_agrees_on_random_small_combinations() {
 /// lead or none, and for each declarer hand even chances of 0 to 2
 /// entries; one chance in three of a random limit on rounds, one in eight
 /// that each declarer card is discarded, and one in four of a random
-/// fixed lead; seeded by the combination; sometimes no layout fits or no
-/// lead is legal
+/// fixed lead; one chance in three each of 0 to 2 ruffs per declarer
+/// hand or per defender; seeded by the combination; sometimes no layout
+/// fits or no lead is legal
 fn random_constraints(north: Holding, south: Holding) -> Constraints {
     let mut x = u64::from(north.to_bits()) << 16 | u64::from(south.to_bits()) | 1 << 40;
     let mut rand = move || {
@@ -793,6 +814,12 @@ fn random_constraints(north: Holding, south: Holding) -> Constraints {
     if rand() % 4 == 0 && !left.is_empty() {
         c.lead = Some(Rank::new(left[(rand() % left.len() as u64) as usize]));
     }
+    let side = rand() % 3;
+    if side > 0 {
+        for seat in [side as usize - 1, side as usize + 1] {
+            c.ruffs[seat] = (rand() % 3) as u8;
+        }
+    }
     c
 }
 
@@ -841,6 +868,7 @@ fn oracle_agrees_on_reference_cases() {
         rounds: Option<u8>,
         lead: Option<String>,
         discard: Option<String>,
+        ruffs: Option<[u8; 4]>,
         score: Option<u64>,
         value: Option<f64>,
         tolerance: Option<f64>,
@@ -866,6 +894,7 @@ fn oracle_agrees_on_reference_cases() {
             rounds: c.rounds.unwrap_or(d.rounds),
             lead: c.lead.as_deref().map(|r| r.parse().unwrap()),
             discards: known(&c.discard),
+            ruffs: c.ruffs.unwrap_or(d.ruffs),
         };
         let combo = (holding(&c.north), holding(&c.south), constraints);
         if 13 - combo.0.len() - combo.1.len() > 8 {

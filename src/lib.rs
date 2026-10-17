@@ -11,7 +11,7 @@
 //! defender's length and high-card points in the suit; scores are then out
 //! of [`Analysis::total`].  They also set where the lead starts, how many
 //! entries each hand has outside the suit, how many rounds are played, a
-//! fixed first card, and declarer's cards discarded elsewhere.
+//! fixed first card, declarer's cards discarded elsewhere, and ruffs.
 //!
 //! The search is exact.  Instead of a greedy per-branch value — which is *not*
 //! optimal here, because a falsecarding defender spreads one layout's weight
@@ -46,7 +46,8 @@
 //!
 //! Assumptions (the usual ones, as in Pavlicek's card-combination tables):
 //! unlimited entries to both hands unless [`Constraints::entries`] says
-//! otherwise, no ruffs, no inference about the enemy hands beyond
+//! otherwise, no ruffs unless [`Constraints::ruffs`] allows them (one side
+//! only, so no overruff), no inference about the enemy hands beyond
 //! [`Constraints`], and only tricks won in this suit count.  The defenders
 //! never lead the suit: after winning a round they switch, and declarer
 //! comes back by an entry.
@@ -88,7 +89,8 @@ pub enum Error {
     BadConstraints,
     /// No layout fits the [`Constraints`]
     NoLayout,
-    /// The goal does not take [`Constraints`] yet: only trick targets do
+    /// The goal does not take [`Constraints`] yet (only trick targets do),
+    /// both sides may ruff, or a [`Game`] has ruffs
     Unsupported,
 }
 
@@ -105,7 +107,9 @@ impl fmt::Display for Error {
                  the first lead"
             }
             Self::NoLayout => "no layout fits the constraints",
-            Self::Unsupported => "only trick targets take constraints",
+            Self::Unsupported => {
+                "only trick targets take constraints, only one side may ruff, and games take no ruffs"
+            }
             Self::Interrupted { bound, total } => {
                 let bound = *bound as f64 / *total as f64;
                 return write!(f, "search interrupted; the best is at most {bound:.4}");
@@ -148,10 +152,15 @@ pub enum Plan {
         cards: Holding,
         then: Box<Plan>,
     },
+    /// Declarer ruffs from `seat`, void in the suit (see [`Constraints::ruffs`])
+    Ruff { seat: Seat, then: Box<Plan> },
     /// A defender's card decides the continuation; `None` = shows out
     Defender {
         seat: Seat,
         branches: Vec<(Vec<Option<Rank>>, Plan)>,
+        /// The continuation if the defender ruffs, when they may
+        #[cfg_attr(feature = "serde", serde(skip_serializing_if = "Option::is_none"))]
+        ruff: Option<Box<Plan>>,
     },
 }
 
@@ -233,6 +242,11 @@ pub struct Constraints {
     /// "discards or ruffs": spent in other suits).  They are not the
     /// defenders' either.
     pub discards: Holding,
+    /// Rounds North, East, South, West may each ruff, once void in the
+    /// suit.  A ruff is optional, beats every card of the suit, and wins the
+    /// trick, which counts as a trick in the suit.  Only one side may ruff:
+    /// trump ranks are not modelled, so there is no overruff.
+    pub ruffs: [u8; 4],
 }
 
 impl Default for Constraints {
@@ -247,6 +261,7 @@ impl Default for Constraints {
             rounds: 13,
             lead: None,
             discards: Holding::EMPTY,
+            ruffs: [0; 4],
         }
     }
 }
@@ -596,6 +611,23 @@ struct State {
     rounds: u8,
     /// Card declarer must lead to the first round; 0 for none or later
     fixed: u8,
+    /// Ruffs left to North, East, South, West
+    ruffs: [u8; 4],
+}
+
+/// Rank of a ruff in [`State::trick`]: above the suit's ace.  A declarer
+/// move of class `1 << RUFF` is a ruff.
+const RUFF: u8 = 15;
+
+/// What a defender plays
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Card {
+    /// A card of this class of the [`Structure`]
+    Class(usize),
+    /// A discard: the defender shows out
+    Out,
+    /// A ruff, once void
+    Ruff,
 }
 
 /// [`State::entries`] of a hand with unlimited entries
@@ -618,8 +650,9 @@ impl State {
     fn live(&self) -> u16 {
         let mut live = self.ns[0] | self.ns[1];
         for p in 0..usize::from(self.played) {
-            if (self.leader + p as u8).is_multiple_of(2) && self.trick[p] != 0 {
-                live |= 1 << self.trick[p];
+            let r = self.trick[p];
+            if (self.leader + p as u8).is_multiple_of(2) && r != 0 && r != RUFF {
+                live |= 1 << r;
             }
         }
         live
@@ -980,6 +1013,10 @@ impl Solver {
         {
             return Err(Error::BadConstraints);
         }
+        let [n, e, s, w] = constraints.ruffs;
+        if (n > 0 || s > 0) && (e > 0 || w > 0) {
+            return Err(Error::Unsupported);
+        }
         let mut solver = Self {
             north,
             south,
@@ -1138,6 +1175,7 @@ impl Solver {
                 c.rounds
             },
             fixed: c.lead.map_or(0, Rank::get),
+            ruffs: c.ruffs,
         }
     }
 
@@ -1364,12 +1402,19 @@ impl Solver {
 
     /// Tricks declarer takes on each root layout seeing all four hands,
     /// which no line beats.  One representative deal per layout: missing
-    /// cards of a class are interchangeable.
+    /// cards of a class are interchangeable.  Declarer's ruffs are not
+    /// modelled there, so with them the bound is every trick.
     fn double_dummy(&mut self) -> Rc<[u8]> {
         if let Some(dd) = &self.dd {
             return Rc::clone(dd);
         }
         let s = self.structure(self.root().live());
+        let [n, _, south, _] = self.constraints.ruffs;
+        if n > 0 || south > 0 {
+            let dd: Rc<[u8]> = vec![self.max_tricks(); s.len].into();
+            self.dd = Some(Rc::clone(&dd));
+            return dd;
+        }
         let mut memo = FxMap::default();
         let dd: Rc<[u8]> = (0..s.len)
             .map(|i| {
@@ -1488,14 +1533,18 @@ impl Solver {
             ch.lead = 0;
             ch.fixed = 0;
         }
-        ch.ns[at as usize / 2] &= !(1 << rank);
+        if rank == RUFF {
+            ch.ruffs[usize::from(at)] -= 1;
+        } else {
+            ch.ns[at as usize / 2] &= !(1 << rank);
+        }
         self.advance(ch, s, rank).0
     }
 
     /// Declarer's options now: (resulting state, seat, equivalence class
     /// played).  Between tricks that includes the choice of hand, among
-    /// those [`State::may_lead`]; at third hand a void hand has the single
-    /// option "discard" (class 0).
+    /// those [`State::may_lead`]; at third hand a void hand may "discard"
+    /// (class 0), or ruff (class `1 << RUFF`) if it has a ruff left.
     fn declarer_moves(&mut self, st: &State, s: &Structure) -> Vec<(State, u8, u16)> {
         let mut out = Vec::new();
         let seats: &[u8] = if st.played == 0 {
@@ -1511,6 +1560,9 @@ impl Solver {
             if hand == 0 {
                 if st.played != 0 {
                     out.push((self.declarer_play(st, s, at, 0), at, 0));
+                    if st.ruffs[usize::from(at)] > 0 {
+                        out.push((self.declarer_play(st, s, at, RUFF), at, 1 << RUFF));
+                    }
                 }
                 continue;
             }
@@ -1524,15 +1576,16 @@ impl Solver {
         out
     }
 
-    /// A defender's options now: (class played, layouts where it is legal,
-    /// resulting state, declarer won the trick); `None` = shows out
+    /// A defender's options now: (card played, layouts where it is legal,
+    /// resulting state, declarer won the trick)
     fn defender_moves(
         &mut self,
         st: &State,
         s: &Structure,
         c: Set,
-    ) -> Vec<(Option<usize>, Set, State, bool)> {
-        let d = ((st.leader + st.played) % 4 / 2) as usize; // 0 = East, 1 = West
+    ) -> Vec<(Card, Set, State, bool)> {
+        let at = (st.leader + st.played) % 4;
+        let d = usize::from(at / 2); // 0 = East, 1 = West
         let mut out = Vec::new();
         let mut void = c;
         for (k, class) in s.classes.iter().enumerate() {
@@ -1543,14 +1596,19 @@ impl Solver {
                 let mut ch = *st;
                 ch.shown[d][k] += 1;
                 let (ch, won) = self.advance(ch, s, lowest(class.ranks));
-                out.push((Some(k), g, ch, won));
+                out.push((Card::Class(k), g, ch, won));
             }
         }
         if !void.is_empty() {
             let mut ch = *st;
             ch.void[d] = true;
-            let (ch, won) = self.advance(ch, s, 0);
-            out.push((None, void, ch, won));
+            let (out_ch, won) = self.advance(ch, s, 0);
+            out.push((Card::Out, void, out_ch, won));
+            if st.ruffs[usize::from(at)] > 0 {
+                ch.ruffs[usize::from(at)] -= 1;
+                let (ch, won) = self.advance(ch, s, RUFF);
+                out.push((Card::Ruff, void, ch, won));
+            }
         }
         out
     }
@@ -1806,11 +1864,8 @@ impl Solver {
         if Self::is_declarer_turn(&st) {
             for (ch, at, cards) in self.declarer_moves(&st, &s) {
                 if self.guarantees(ch, &req, s.len, goal) {
-                    return Plan::Declarer {
-                        seat: seat(at),
-                        cards: Holding::from_bits_truncate(cards),
-                        then: Box::new(self.plan(ch, req, goal)),
-                    };
+                    let then = self.plan(ch, req, goal);
+                    return Self::declarer_step(at, cards, then);
                 }
             }
             assert!(self.interrupted, "req is feasible, so some move keeps it");
@@ -1818,7 +1873,8 @@ impl Solver {
         }
         let seat_index = (st.leader + st.played) % 4;
         let mut branches: Vec<(Vec<Option<Rank>>, Plan)> = Vec::new();
-        for (class, g, ch, won) in self.defender_moves(&st, &s, c) {
+        let mut ruff = None;
+        for (card, g, ch, won) in self.defender_moves(&st, &s, c) {
             let map = self.map(&st, &ch);
             let mut sub_req = Tricks::ZERO;
             let mut wanted = false;
@@ -1832,27 +1888,45 @@ impl Solver {
             } else {
                 Plan::Hopeless
             };
-            Self::add_branch(&mut branches, &s, class, sub);
+            Self::add_branch(&mut branches, &mut ruff, &s, card, sub);
         }
         Plan::Defender {
             seat: seat(seat_index),
             branches,
+            ruff,
         }
     }
 
-    /// Add a defender's `class` (`None` = shows out) leading to `sub`,
-    /// merged with any branch that goes on the same way
+    /// Declarer's move `cards` (as [`declarer_moves`](Self::declarer_moves)
+    /// gives it) from seat `at`, then `then`
+    fn declarer_step(at: u8, cards: u16, then: Plan) -> Plan {
+        let (seat, then) = (seat(at), Box::new(then));
+        if cards == 1 << RUFF {
+            Plan::Ruff { seat, then }
+        } else {
+            let cards = Holding::from_bits_truncate(cards);
+            Plan::Declarer { seat, cards, then }
+        }
+    }
+
+    /// Add a defender's `card` leading to `sub`: a ruff to `ruff`, else to
+    /// `branches`, merged with any branch that goes on the same way
     fn add_branch(
         branches: &mut Vec<(Vec<Option<Rank>>, Plan)>,
+        ruff: &mut Option<Box<Plan>>,
         s: &Structure,
-        class: Option<usize>,
+        card: Card,
         sub: Plan,
     ) {
-        let labels: Vec<Option<Rank>> = match class {
-            Some(k) => ranks(s.classes[k].ranks)
+        let labels: Vec<Option<Rank>> = match card {
+            Card::Class(k) => ranks(s.classes[k].ranks)
                 .map(|r| Some(Rank::new(r)))
                 .collect(),
-            None => vec![None],
+            Card::Out => vec![None],
+            Card::Ruff => {
+                *ruff = Some(Box::new(sub));
+                return;
+            }
         };
         match branches.iter_mut().find(|(_, p)| *p == sub) {
             Some((existing, _)) => existing.extend(labels),
@@ -1880,9 +1954,14 @@ pub struct Game {
 
 impl Game {
     /// Deal `west` the given cards (East gets the rest of the missing ones)
-    /// and play for `goal`
+    /// and play for `goal`; not with [`Constraints::ruffs`]
     pub fn new(solver: &mut Solver, west: Holding, goal: Goal) -> Result<Self, Error> {
         solver.check(goal)?;
+        // ponytail: a Play cannot show a ruff yet; the analysis view
+        // (phase 5) will need it
+        if solver.constraints.ruffs != [0; 4] {
+            return Err(Error::Unsupported);
+        }
         let west = west.to_bits();
         if west & !solver.missing != 0 {
             return Err(Error::BadWest);
@@ -2022,10 +2101,11 @@ impl Game {
         let c = Solver::consistent(&st, s);
         let moves = solver.defender_moves(&st, s, c);
         let mut best: Option<((u8, u64), usize)> = None;
-        for (m, &(class, _, ch, trick)) in moves.iter().enumerate() {
-            let legal = match class {
-                Some(k) => hand & s.classes[k].ranks != 0,
-                None => hand == 0,
+        for (m, &(card, _, ch, trick)) in moves.iter().enumerate() {
+            let legal = match card {
+                Card::Class(k) => hand & s.classes[k].ranks != 0,
+                Card::Out => hand == 0,
+                Card::Ruff => false,
             };
             if !legal {
                 continue;
@@ -2064,7 +2144,7 @@ impl Game {
             }
         }
         let (_, m) = best.expect("a defender can always follow or show out");
-        let (class, g, ch, trick) = moves[m];
+        let (card, g, ch, trick) = moves[m];
         let map = solver.map(&st, &ch);
         self.reqs = self
             .reqs
@@ -2074,7 +2154,10 @@ impl Game {
             .collect();
         self.reqs.dedup();
         let won = self.won + u8::from(trick);
-        let card = class.map(|k| lowest(hand & s.classes[k].ranks));
+        let card = match card {
+            Card::Class(k) => Some(lowest(hand & s.classes[k].ranks)),
+            _ => None,
+        };
         if let Some(r) = card {
             self.hands[d] &= !(1 << r);
         }
@@ -2101,13 +2184,25 @@ impl Plan {
                 }
                 then.fmt_indented(f, depth)
             }
-            Self::Defender { seat, branches } => {
+            Self::Ruff { seat, then } => {
+                writeln!(f, "{pad}{seat:?} ruffs")?;
+                then.fmt_indented(f, depth)
+            }
+            Self::Defender {
+                seat,
+                branches,
+                ruff,
+            } => {
                 for (labels, plan) in branches {
                     let labels: Vec<String> = labels
                         .iter()
                         .map(|l| l.map_or("void".to_string(), |r| r.to_string()))
                         .collect();
                     writeln!(f, "{pad}{seat:?} {}:", labels.join("/"))?;
+                    plan.fmt_indented(f, depth + 1)?;
+                }
+                if let Some(plan) = ruff {
+                    writeln!(f, "{pad}{seat:?} ruffs:")?;
                     plan.fmt_indented(f, depth + 1)?;
                 }
                 Ok(())
@@ -2413,15 +2508,13 @@ impl Solver {
             }
             Step::Move(k) => {
                 let (ch, at, cards) = self.declarer_moves(&st, &s)[k];
-                Plan::Declarer {
-                    seat: seat(at),
-                    cards: Holding::from_bits_truncate(cards),
-                    then: Box::new(self.plan_line(ch, req)),
-                }
+                let then = self.plan_line(ch, req);
+                Self::declarer_step(at, cards, then)
             }
             Step::Branch => {
                 let mut branches = Vec::new();
-                for (class, g, ch, won) in self.defender_moves(&st, &s, c) {
+                let mut ruff = None;
+                for (card, g, ch, won) in self.defender_moves(&st, &s, c) {
                     let map = self.map(&st, &ch);
                     let sub_req = Self::pass(&req, g, &map, won);
                     let sub = if self.line(ch, sub_req) == Tricks::ZERO {
@@ -2429,11 +2522,12 @@ impl Solver {
                     } else {
                         self.plan_line(ch, sub_req)
                     };
-                    Self::add_branch(&mut branches, &s, class, sub);
+                    Self::add_branch(&mut branches, &mut ruff, &s, card, sub);
                 }
                 Plan::Defender {
                     seat: seat((st.leader + st.played) % 4),
                     branches,
+                    ruff,
                 }
             }
         }

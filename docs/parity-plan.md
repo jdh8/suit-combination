@@ -35,7 +35,7 @@ targets; double-dummy averages are upper bounds, not policies.
 | Hidden-card analysis | Pareto vectors keep one strategy across indistinguishable layouts; targets (0/1 vectors) and `ExactExpected` are exhaustive | Little independent validation |
 | Expected tricks | `Expected` = combination of target lines plus an upper bound; exact mode separate | Fast EV is not always optimal (`A8 / JT62`: 1.644 vs 1.651) |
 | Probabilities | Fixed 13/13 vacant places, `TOTAL = C(26,13)` hard-coded in engine and browser | No vacant places, known cards, length or HCP constraints |
-| Entries and play | Unlimited entries by default; for trick targets, a forced first leader and finite entries per hand (`Constraints::first`, `Constraints::entries`); no ruffs | No limited rounds, fixed plays, ruffs; no entries for EV |
+| Entries and play | Unlimited entries, no ruffs by default; for trick targets, the starting hand, finite entries, round limits, a fixed first card, discards and one side's ruffs (`Constraints`) | None of these for EV; no overruffs |
 | Alternative lines | Values for every equivalent opening lead; one plan per goal | No line browser, line-by-layout matrix or comparison |
 | Goals | At-least-N, bounded EV, exact EV | No MP/IMP line comparison |
 | Coverage | At most eight missing cards (`TooManyMissing`) | `AQ / 2` is rejected |
@@ -254,7 +254,25 @@ probes agreed on the round limits), CCAnalyser's published first-card
 values for `AQJT / 65432` (N:A 12.43% and 12.49% at 8/11, N:Q 0.00%), the
 evaluator enforcing each option, and the oracle sweep with random limits,
 discards and first cards; mutants of each are caught. Defaults
-byte-identical, same speed. Ruffs are next.
+byte-identical, same speed.
+
+Ruffs complete item 3 (`Constraints::ruffs`, CLI `--ruffs N,E,S,W`):
+SuitC's per-seat count of rounds a player may ruff once void, with the
+semantics SuitC leaves undocumented now fixed. A ruff is optional, beats
+every card of the suit and counts as a trick in it; the winner of a
+ruffed round leads next as with any other (entries permitting). Only one
+side may ruff (`Error::Unsupported` otherwise): trump ranks are not
+modelled, so there is no overruff, and SuitC's author warns that mixing
+sides "leads to unpredictable effects". Declarer sees a defender's ruff as
+its own branch (`Plan::Defender::ruff`) and plays one as `Plan::Ruff`. An
+interrupted search with declarer ruffs bounds by every trick, as double
+dummy does not see them. `Game` rejects ruffs until the analysis view can
+show them. Checked by hand derivations that SuitC's probes matched
+(`AKQ / 432` with East or both defenders ruffing, `A2 / KQ543` with a
+North ruff), the SuitC guide's published `KQT32 / 654` table with a ruff
+each (63.00%), the evaluator, and the oracle sweep with random ruffs on
+one side; mutants (no defender ruff, no declarer ruff, ruffs unspent, a
+ruff that loses) are caught. Defaults byte-identical, same speed.
 
 **Done:** each option matches independent target examples; defaults
 reproduce phase 1; `AQ / 2` solves; unsupported option combinations,
@@ -310,8 +328,9 @@ for the measured scope.
 
 ## Next step and exclusions
 
-Phase 3, item 3: fixed first plays, finite rounds, specified discards and
-ruffs for trick targets.
+Phase 3, item 4: lift the eight-missing-card limit for ordinary holdings
+(`AQ / 2` must solve), sizing representations by the compressed layout
+space.
 
 Not needed: rewrite, server backend, new framework, GPU search, full-deal AI,
 bidding inference. Mixed-strategy equilibria are a separate research question.

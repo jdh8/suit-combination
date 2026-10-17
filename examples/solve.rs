@@ -1,7 +1,7 @@
 //! `cargo run --release --example solve -- AJ52 K76 [TARGET|ev|exact] [--budget SECS]
 //! [--vacant EAST,WEST] [--east CARDS] [--west CARDS] [--length EAST,WEST]
 //! [--hcp EAST,WEST] [--first N|S] [--entries NORTH,SOUTH] [--rounds N]
-//! [--lead CARD] [--discard CARDS]`
+//! [--lead CARD] [--discard CARDS] [--ruffs N,E,S,W]`
 //!
 //! Prints the value of every goal (or just the one given) with its status,
 //! and the line for the goal shown last.  `--budget` gives each goal at most
@@ -13,6 +13,7 @@
 //! other suits, `-` for unlimited, e.g. `--entries -,1`.  `--rounds` stops
 //! after that many rounds, `--lead` fixes declarer's first card, and
 //! `--discard` takes declarer's cards out of play (not to the defenders).
+//! `--ruffs` gives the rounds each seat may ruff once void, one side only.
 //! Only trick targets take these.
 
 use contract_bridge::{Holding, Rank, Seat};
@@ -37,7 +38,8 @@ fn holding(seat: &str, s: &str) -> Holding {
 
 const USAGE: &str = "usage: solve NORTH SOUTH [TARGET|ev|exact] [--budget SECS] \
     [--vacant EAST,WEST] [--east CARDS] [--west CARDS] [--length EAST,WEST] [--hcp EAST,WEST] \
-    [--first N|S] [--entries NORTH,SOUTH] [--rounds N] [--lead CARD] [--discard CARDS]";
+    [--first N|S] [--entries NORTH,SOUTH] [--rounds N] [--lead CARD] [--discard CARDS] \
+    [--ruffs N,E,S,W]";
 
 /// Removes `--flag VALUE` from `args`, returning the value
 fn flag(args: &mut Vec<String>, name: &str) -> Option<String> {
@@ -128,6 +130,13 @@ fn main() {
     }
     if let Some(v) = flag(&mut args, "--discard") {
         constraints.discards = holding("discard", &v);
+    }
+    if let Some(v) = flag(&mut args, "--ruffs") {
+        let ruffs: Vec<u8> = v.split(',').filter_map(|n| n.parse().ok()).collect();
+        let Ok(ruffs) = ruffs.try_into() else {
+            fail("--ruffs: N,E,S,W expected, e.g. 0,1,0,1");
+        };
+        constraints.ruffs = ruffs;
     }
     let [north, south, rest @ ..] = args.as_slice() else {
         fail(USAGE);

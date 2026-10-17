@@ -355,5 +355,30 @@
     "north": "AKQ32", "south": "54", "goal": 4, "discard": "2", "score": 3695120,
     "source": "Hand derivation (SuitPlay's discard: the card leaves play, not to the defenders): AKQ3 opposite 54 against the same six cards takes four only on 3-3: 20 C(20, 10)",
     "checked": "2026-10-18", "note": "Handing the 2 to the defenders would make seven missing cards and a different answer"
+  },
+  {
+    "north": "AKQ", "south": "432", "goal": 3, "ruffs": [0, 1, 0, 0], "score": 8433530,
+    "source": "Hand derivation: East may ruff once; declarer loses a round exactly when East runs out within three, so wins when East holds at least three: West at most four, sum of C(7, w) C(19, 13 - w) for w up to 4",
+    "checked": "2026-10-18", "note": "SuitC's probe agrees (81.0870 percent)"
+  },
+  {
+    "north": "AKQ", "south": "432", "goal": 3, "ruffs": [0, 1, 0, 1], "score": 6466460,
+    "source": "Hand derivation: both defenders may ruff once, so only 4-3 either way survives three rounds: C(7, 3) C(19, 10) + C(7, 4) C(19, 9)",
+    "checked": "2026-10-18", "note": "SuitC's probe agrees (62.1739 percent)"
+  },
+  {
+    "north": "A2", "south": "KQ543", "goal": 5, "score": 3695120,
+    "source": "Hand derivation: the fifth trick needs a 3-3 split: 20 C(20, 10)",
+    "checked": "2026-10-18", "note": "Baseline for the ruff below"
+  },
+  {
+    "north": "A2", "south": "KQ543", "goal": 5, "ruffs": [1, 0, 0, 0], "score": 8733920,
+    "source": "Hand derivation: North, void after two rounds, ruffs the fourth round, setting up South's fifth card on 3-3 or 4-2: 20 C(20, 10) + 15 C(20, 11) + 15 C(20, 9)",
+    "checked": "2026-10-18", "note": "A ruff counts as a trick in the suit; SuitC's probe agrees (83.9752 percent)"
+  },
+  {
+    "north": "KQT32", "south": "654", "goal": 2, "ruffs": [0, 1, 0, 1], "value": 0.6300, "tolerance": 0.00005,
+    "source": "SuitC User Guide 9, pp. 3-4: each defender may ruff once; the guide prints the line's tricks per layout class, which give 63.00 percent for two tricks (the same table without ruffs reproduces the guide's 55.39/89.57/98.04 percent)",
+    "checked": "2026-10-18", "note": "Decoded from the published table; SuitC's probe agrees"
   }
 ]

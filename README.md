@@ -29,7 +29,7 @@ both hands, no ruffs, no inference about the enemy hands, only tricks in this
 suit count.  Up to 8 missing cards.  For trick targets, `Constraints` set
 other vacant places, cards known to be with East or West, length and HCP
 ranges, the hand the lead starts in, finite entries, a limit on rounds, a
-fixed first card and discards.
+fixed first card, discards and ruffs.
 
 ## Library
 
@@ -60,13 +60,16 @@ one of its entries, as in SuitPlay (the defenders, after winning a round,
 switch suits).  They also take a limit on the rounds played (tricks count
 only within them), a card declarer must lead first, and discards: declarer's
 cards spent in other suits, out of play but not given to the defenders, as
-SuitPlay's "discards or ruffs".  Only trick targets take them
+SuitPlay's "discards or ruffs".  And ruffs, as SuitC's: the rounds each
+seat may ruff once void in the suit.  A ruff is optional, beats every card of
+the suit and counts as a trick in it; only one side may ruff, as trump ranks
+are not modelled (no overruff).  Only trick targets take them
 (`Error::Unsupported` otherwise), and scores are then out of
 `Analysis::total`, not `TOTAL`.  The CLI takes `--vacant EAST,WEST`,
 `--east CARDS`, `--west CARDS`, `--length EAST,WEST` and `--hcp EAST,WEST`,
 ranges such as `-,-1` (West at most one card) or `-,1-2`, `--first N|S`
 and `--entries NORTH,SOUTH` such as `-,1` (`-` for unlimited), `--rounds N`,
-`--lead CARD` and `--discard CARDS`.
+`--lead CARD`, `--discard CARDS` and `--ruffs N,E,S,W`.
 
 Every `Analysis` says whether it is `proven`: its `score` equals its `bound`,
 so no line does better.  Only a `Goal::Expected` line can fall short; the

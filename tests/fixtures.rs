@@ -38,6 +38,8 @@ struct Case {
     lead: Option<String>,
     /// Declarer's cards kept out of play
     discard: Option<String>,
+    /// Rounds North, East, South, West may ruff
+    ruffs: Option<[u8; 4]>,
     score: Option<u64>,
     /// The constrained denominator; [`TOTAL`] if absent
     total: Option<u64>,
@@ -75,6 +77,7 @@ impl Case {
             rounds: self.rounds.unwrap_or(d.rounds),
             lead: self.lead.as_deref().map(|r| r.parse().unwrap()),
             discards: known(&self.discard),
+            ruffs: self.ruffs.unwrap_or(d.ruffs),
         }
     }
 }
@@ -109,7 +112,12 @@ struct Pos {
     rounds: u8,
     /// Card the first lead must be (or be equivalent to)
     fixed: Option<u8>,
+    /// Ruffs left by seat index
+    ruffs: [u8; 4],
 }
+
+/// A ruff in [`Pos::trick`]: above every card of the suit
+const RUFF: u8 = 15;
 
 impl Pos {
     /// Declarer's hand `h` (0 North, 1 South) leads one of `cards`,
@@ -165,7 +173,17 @@ fn follow(plan: &Plan, mut p: Pos) -> u8 {
             };
             follow(then, p.play(at, rank))
         }
-        Plan::Defender { seat, branches } => {
+        Plan::Ruff { seat, then } => {
+            let at = seat_index(*seat);
+            assert!(p.played > 0 && p.hands[at] == 0, "ruff while not void");
+            p.ruffs[at] = p.ruffs[at].checked_sub(1).expect("no ruff left");
+            follow(then, p.play(at, RUFF))
+        }
+        Plan::Defender {
+            seat,
+            branches,
+            ruff,
+        } => {
             let at = seat_index(*seat);
             let hand = p.hands[at];
             let options: Vec<Option<u8>> = if hand == 0 {
@@ -173,6 +191,11 @@ fn follow(plan: &Plan, mut p: Pos) -> u8 {
             } else {
                 (2..15).filter(|r| hand >> r & 1 != 0).map(Some).collect()
             };
+            let ruffed = (hand == 0 && p.ruffs[at] > 0).then(|| {
+                let mut p = p;
+                p.ruffs[at] -= 1;
+                follow(ruff.as_ref().expect("plan covers the ruff"), p.play(at, RUFF))
+            });
             options
                 .into_iter()
                 .map(|o| {
@@ -183,6 +206,7 @@ fn follow(plan: &Plan, mut p: Pos) -> u8 {
                         .expect("plan covers every defence");
                     follow(sub, p.play(at, o.unwrap_or(0)))
                 })
+                .chain(ruffed)
                 .min()
                 .unwrap()
         }
@@ -235,6 +259,7 @@ fn evaluate(a: &Analysis, c: &Constraints) -> u64 {
             entries: c.entries,
             rounds: c.rounds,
             fixed: c.lead.map(Rank::get),
+            ruffs: c.ruffs,
         };
         let weight = weight(missing, west, c);
         let tricks = if weight == 0 { 0 } else { follow(&a.plan, p) };

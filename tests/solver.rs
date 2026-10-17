@@ -322,3 +322,91 @@ fn constraint_errors() {
     let game = Game::new(&mut s, h("KJ"), t).unwrap();
     assert_eq!(game.weight(&mut s), s.total());
 }
+
+#[test]
+fn errors_of_play_constraints() {
+    let h = |s: &str| s.parse::<Holding>().unwrap();
+    let solver = |c| Solver::with_constraints(h("AQ"), h("432"), c);
+    let d = Constraints::default();
+    let error = |c| solver(c).err();
+    // Both sides may ruff; a discard or a lead not declarer's; no round;
+    // a lead from a hand with no way in
+    assert_eq!(
+        error(Constraints {
+            ruffs: [1, 1, 0, 0],
+            ..d
+        }),
+        Some(Error::Unsupported)
+    );
+    let bad = Some(Error::BadConstraints);
+    assert_eq!(
+        error(Constraints {
+            discards: h("K"),
+            ..d
+        }),
+        bad
+    );
+    assert_eq!(
+        error(Constraints {
+            lead: Some("K".parse().unwrap()),
+            ..d
+        }),
+        bad
+    );
+    assert_eq!(error(Constraints { rounds: 0, ..d }), bad);
+    let lead_a = Some("A".parse().unwrap());
+    let south = Some(Seat::South);
+    let c = Constraints {
+        lead: lead_a,
+        first: south,
+        entries: [Some(0), None],
+        ..d
+    };
+    assert_eq!(error(c), bad);
+    assert_eq!(
+        error(Constraints {
+            first: Some(Seat::East),
+            ..d
+        }),
+        bad
+    );
+    // Targets stop at the rounds
+    let mut s = solver(Constraints { rounds: 1, ..d }).unwrap();
+    assert_eq!(s.analyze_all().unwrap().len(), 1);
+    let t = Goal::Tricks { target: 2 };
+    assert_eq!(s.analyze(t).unwrap_err(), Error::BadTarget);
+    // Games cannot show a ruff
+    let mut s = solver(Constraints {
+        ruffs: [0, 1, 0, 0],
+        ..d
+    })
+    .unwrap();
+    assert_eq!(
+        Game::new(&mut s, h("K"), t).unwrap_err(),
+        Error::Unsupported
+    );
+}
+
+/// Declarer's ruffs take tricks double dummy does not see, so an
+/// interrupted search must not bound by it
+#[test]
+fn interrupted_bound_counts_declarer_ruffs() {
+    let h = |s: &str| s.parse::<Holding>().unwrap();
+    let c = Constraints {
+        ruffs: [1, 0, 0, 0],
+        ..Constraints::default()
+    };
+    let goal = Goal::Tricks { target: 5 };
+    let best = Solver::with_constraints(h("A2"), h("KQ543"), c)
+        .unwrap()
+        .analyze(goal)
+        .unwrap()
+        .score;
+    let mut solver = Solver::with_constraints(h("A2"), h("KQ543"), c).unwrap();
+    solver.set_poll_interval(1);
+    solver.set_interrupt(|_| true);
+    match solver.analyze(goal) {
+        Err(Error::Interrupted { bound, .. }) => assert!(bound >= best, "{bound} < {best}"),
+        r => panic!("{r:?}"),
+    }
+}
