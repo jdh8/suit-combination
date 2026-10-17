@@ -19,8 +19,9 @@ use std::time::{Duration, Instant};
 use suit_combination::{Goal, Solver, TOTAL};
 
 const SLOW: &[&str] = &[
-    "A953 KJ8", "KJ84 T63", "KQ85 T73", "KJ85 T63", "KT85 J63", "KJ62 T84", "AQ95 T73",
-    "A862 J94", "AQT8 642", "KT97 53", "A8 JT62",
+    "A953 KJ8", "KJ84 T63", "KQ85 T73", "KJ85 T63", "KT85 J63", "KJ62 T84", "AQ95 T73", "A862 J94",
+    "AQT8 642", "KT97 53", "A8 JT62", "KJ9753 -", "KJ963 5", "KJ63 95", "KJ863 -", "KJ86 3",
+    "KJ965 3",
 ];
 
 fn holding(s: &str) -> Holding {

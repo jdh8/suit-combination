@@ -91,11 +91,13 @@ Deployed to GitHub Pages by [`.github/workflows/pages.yml`](.github/workflows/pa
 Random 7–9 card problems solve in a few milliseconds.  The Pareto search is
 exponential in the worst case.  For a trick target the vectors are collapsed
 to 0/1 ("at least that many more tricks on this layout"), which keeps the
-antichains small: the hardest known combinations (`A953` opposite `KJ8`,
-`KJ84` opposite `T63`) take a few seconds per target, and `KQ85` opposite
-`T73` about seven minutes.  `Goal::Expected` adds well under a second to
-the targets, while `Goal::ExactExpected` needs the full vectors and takes a
-minute on `A953` opposite `KJ8`.  The web trainer
-runs the solver in a worker, so the page stays responsive; a random deal is
-abandoned after two seconds and another dealt, and a combination you enter
-yourself runs until it finishes or you cancel it.
+antichains small: hard combinations such as `A953` opposite `KJ8` and
+`KJ84` opposite `T63` take well under a second per target and `KQ85`
+opposite `T73` about ten seconds, but for three tricks the hardest known,
+`KJ9753` opposite a void, does not finish in fifteen minutes.
+`Goal::Expected` adds well under a second to the targets, while
+`Goal::ExactExpected` needs the full vectors and takes about twenty seconds
+on `A953` opposite `KJ8`.  The web trainer runs the solver in a worker, so
+the page stays responsive; a random deal is abandoned after two seconds and
+another dealt, and a combination you enter yourself runs until it finishes
+or you cancel it.

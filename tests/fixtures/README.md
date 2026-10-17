@@ -2,8 +2,8 @@
 
 `cases.json` holds one record per case, checked by `tests/fixtures.rs`.
 `corpus.txt` is the benchmark corpus for `examples/bench.rs` (one `NORTH
-SOUTH` per line, `-` for a void; generated with seed 1, then the known slow
-cases appended).
+SOUTH` per line, `-` for a void), as `bench gen 1` prints it: one sampled
+combination per stratum, then the known slow cases (`SLOW` in the example).
 
 Every case uses the engine's default model unless a future field says
 otherwise: omniscient falsecarding defence, 13/13 vacant places, unlimited

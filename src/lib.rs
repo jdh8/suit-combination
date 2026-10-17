@@ -166,7 +166,7 @@ pub fn analyze_all(north: Holding, south: Holding) -> Result<Vec<Analysis>, Erro
 }
 
 /// Set of layouts by index
-#[derive(Clone, Copy, PartialEq, Eq, Hash, Default)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default)]
 struct Set([u64; 4]);
 
 impl Set {
@@ -178,6 +178,21 @@ impl Set {
 
     fn is_empty(self) -> bool {
         self.0 == [0; 4]
+    }
+
+    fn contains(self, i: usize) -> bool {
+        self.0[i >> 6] >> (i & 63) & 1 != 0
+    }
+
+    /// Sort key of [`maximal_sets`]: the order [`maximal`] gives the 0/1
+    /// [`Tricks`] with the same lanes, which decides ties between lines.
+    /// That is more lanes first, then lexicographic by `Tricks` word (eight
+    /// lanes, the highest most significant).  Byte `b` of `Set` word `k`
+    /// holds the lanes of `Tricks` word `8k + b` in the same significance,
+    /// so swapping bytes makes the first of them the most significant.
+    fn order(self) -> (std::cmp::Reverse<u32>, [u64; 4]) {
+        let count = self.0.iter().map(|w| w.count_ones()).sum();
+        (std::cmp::Reverse(count), self.0.map(u64::swap_bytes))
     }
 
     fn iter(self) -> impl Iterator<Item = usize> {
@@ -208,6 +223,16 @@ impl std::ops::Sub for Set {
     }
 }
 
+impl FromIterator<usize> for Set {
+    fn from_iter<I: IntoIterator<Item = usize>>(iter: I) -> Self {
+        let mut s = Self::EMPTY;
+        for i in iter {
+            s.insert(i);
+        }
+        s
+    }
+}
+
 /// Tricks declarer is guaranteed from here, per layout (0 outside the
 /// layouts consistent with the state); eight layouts per word
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
@@ -225,15 +250,6 @@ impl Tricks {
     fn set(&mut self, i: usize, t: u8) {
         let shift = (i & 7) * 8;
         self.0[i >> 3] = self.0[i >> 3] & !(0xFF << shift) | u64::from(t) << shift;
-    }
-
-    /// Every lane of `self` is at least the lane of `need` (lanes stay below 128)
-    fn covers(&self, need: &Self, len: usize) -> bool {
-        let words = len.div_ceil(8);
-        self.0[..words]
-            .iter()
-            .zip(&need.0[..words])
-            .all(|(&v, &r)| ((v | Self::H) - r) & Self::H == Self::H)
     }
 
     /// Lane-wise `min(self, o)` on the lanes of `mask`, `self` elsewhere
@@ -257,31 +273,91 @@ impl Tricks {
     }
 }
 
-/// Drop duplicates and every vector dominated by another; what remains is a
-/// Pareto antichain
-fn maximal(vs: Vec<Tricks>, len: usize) -> Vec<Tricks> {
-    let words = len.div_ceil(8);
-    // Sort an index by sum (descending, then lexicographic for a stable
-    // choice of line), not the vectors themselves, and dedup by hashing: a
-    // vector can only be dominated by one of larger or equal sum, so the
-    // scan below needs only what came before.
-    let mut seen: std::collections::HashSet<&[u64]> =
-        std::collections::HashSet::with_capacity(vs.len());
-    let mut order: Vec<(u32, u32)> = vs
-        .iter()
-        .enumerate()
-        .filter(|(_, v)| seen.insert(&v.0[..words]))
-        .map(|(i, v)| (v.sum(len), i as u32))
-        .collect();
-    order.sort_unstable_by(|a, b| {
-        b.0.cmp(&a.0)
-            .then_with(|| vs[a.1 as usize].0[..words].cmp(&vs[b.1 as usize].0[..words]))
-    });
-    let mut out: Vec<Tricks> = Vec::new();
+/// A vector of tricks per layout, as [`maximal`] compares them
+trait Lanes: Copy + Eq {
+    /// Every lane of `self` is at least the lane of `o` (`len` lanes are in
+    /// use, the rest are zero)
+    fn covers(&self, o: &Self, len: usize) -> bool;
+    /// `self` with the lanes of `branch` (all ones there) zeroed
+    fn outside(&self, branch: &Self) -> Self;
+}
+
+impl Lanes for Tricks {
+    // Lanes stay below 128.
+    fn covers(&self, o: &Self, len: usize) -> bool {
+        let words = len.div_ceil(8);
+        self.0[..words]
+            .iter()
+            .zip(&o.0[..words])
+            .all(|(&v, &r)| ((v | Self::H) - r) & Self::H == Self::H)
+    }
+
+    fn outside(&self, branch: &Self) -> Self {
+        Self(std::array::from_fn(|k| self.0[k] & !branch.0[k]))
+    }
+}
+
+/// A 0/1 vector: 1 on the layouts in the set
+impl Lanes for Set {
+    fn covers(&self, o: &Self, _: usize) -> bool {
+        (*o - *self).is_empty()
+    }
+
+    fn outside(&self, branch: &Self) -> Self {
+        *self - *branch
+    }
+}
+
+/// Smallest merge worth filing in [`undominated`]: filing every merge made
+/// small cases 5% slower on average, some 20%
+const GROUP_MIN: usize = 64;
+
+/// Keep, in order, each of `sorted` that no vector kept before it covers.
+/// Sorted by decreasing sum, a vector can only be dominated by one before it.
+///
+/// `branch` marks, at a defender node's merge, the layouts of the branch
+/// just merged.  A vector covers another only if its lanes outside the
+/// branch cover the other's, so a large merge files the kept vectors by
+/// their lanes outside and tests a candidate only against the files whose
+/// outside covers its own: the same verdicts from far fewer tests.  Each
+/// candidate there is a row `x ∧ y` with `x`'s lanes outside the branch,
+/// so files are usually few.
+fn undominated<'a, V: Lanes + 'a>(
+    sorted: impl ExactSizeIterator<Item = &'a V>,
+    len: usize,
+    branch: Option<&V>,
+) -> Vec<V> {
+    let mut out: Vec<V> = Vec::new();
+    if let Some(branch) = branch.filter(|_| sorted.len() >= GROUP_MIN) {
+        // Lanes outside, and the kept vectors (indices into `out`) with them
+        let mut files: Vec<(V, Vec<u32>)> = Vec::new();
+        for v in sorted {
+            let a = v.outside(branch);
+            // A file with `a` itself covers `a`, so the scan meets it.
+            let mut same = None;
+            let covered = files.iter().enumerate().any(|(k, (b, kept))| {
+                if !b.covers(&a, len) {
+                    return false;
+                }
+                if *b == a {
+                    same = Some(k);
+                }
+                kept.iter().any(|&j| out[j as usize].covers(v, len))
+            });
+            if !covered {
+                let j = u32::try_from(out.len()).expect("fewer than 2^32 kept vectors");
+                match same {
+                    Some(k) => files[k].1.push(j),
+                    None => files.push((a, vec![j])),
+                }
+                out.push(*v);
+            }
+        }
+        return out;
+    }
     // The vector that dominated the last candidate usually dominates the next.
     let mut last = 0;
-    for &(_, i) in &order {
-        let v = &vs[i as usize];
+    for v in sorted {
         if out.get(last).is_some_and(|o| o.covers(v, len)) {
             continue;
         }
@@ -291,6 +367,33 @@ fn maximal(vs: Vec<Tricks>, len: usize) -> Vec<Tricks> {
         }
     }
     out
+}
+
+/// Drop duplicates and every vector dominated by another; what remains is a
+/// Pareto antichain.  `branch`: see [`undominated`].
+fn maximal(vs: Vec<Tricks>, len: usize, branch: Option<&Tricks>) -> Vec<Tricks> {
+    let words = len.div_ceil(8);
+    // Sort an index by sum (descending, then lexicographic for a stable
+    // choice of line), not the vectors themselves.
+    let mut order: Vec<(u32, u32)> = vs
+        .iter()
+        .enumerate()
+        .map(|(i, v)| (v.sum(len), i as u32))
+        .collect();
+    order.sort_unstable_by(|a, b| {
+        b.0.cmp(&a.0)
+            .then_with(|| vs[a.1 as usize].0[..words].cmp(&vs[b.1 as usize].0[..words]))
+    });
+    // Equal vectors sort next to each other.
+    order.dedup_by(|a, b| vs[a.1 as usize].0[..words] == vs[b.1 as usize].0[..words]);
+    undominated(order.iter().map(|&(_, i)| &vs[i as usize]), len, branch)
+}
+
+/// [`maximal`] on 0/1 vectors as sets: the same antichain in the same order
+fn maximal_sets(mut vs: Vec<Set>, len: usize, branch: Option<&Set>) -> Vec<Set> {
+    vs.sort_unstable_by_key(|v| v.order());
+    vs.dedup();
+    undominated(vs.iter(), len, branch)
 }
 
 const NORTH: u8 = 0;
@@ -456,19 +559,71 @@ impl Structure {
     }
 }
 
+/// rustc's FxHasher: one multiply per word, for the memo tables' small,
+/// trusted keys.  The final rotation (as in rustc-hash 2) brings the
+/// well-mixed high bits down to the bucket index.
+#[derive(Default)]
+struct Fx(u64);
+
+impl Fx {
+    #[inline]
+    fn add(&mut self, word: u64) {
+        self.0 = (self.0.rotate_left(5) ^ word).wrapping_mul(0x517c_c1b7_2722_0a95);
+    }
+}
+
+impl std::hash::Hasher for Fx {
+    #[inline]
+    fn finish(&self) -> u64 {
+        self.0.rotate_left(26)
+    }
+
+    #[inline]
+    fn write(&mut self, bytes: &[u8]) {
+        let (words, rest) = bytes.as_chunks();
+        for &w in words {
+            self.add(u64::from_le_bytes(w));
+        }
+        if !rest.is_empty() {
+            let mut w = [0; 8];
+            w[..rest.len()].copy_from_slice(rest);
+            self.add(u64::from_le_bytes(w));
+        }
+    }
+
+    #[inline]
+    fn write_u8(&mut self, i: u8) {
+        self.add(i.into());
+    }
+
+    #[inline]
+    fn write_u16(&mut self, i: u16) {
+        self.add(i.into());
+    }
+
+    #[inline]
+    fn write_usize(&mut self, i: usize) {
+        self.add(i as u64);
+    }
+}
+
+type FxMap<K, V> = HashMap<K, V, std::hash::BuildHasherDefault<Fx>>;
+
 /// The search for one combination, memoized across goals and [`Game`]s
 pub struct Solver {
     north: Holding,
     south: Holding,
     missing: u16,
     /// Layout spaces by live declarer cards
-    structures: HashMap<u16, Rc<Structure>>,
+    structures: FxMap<u16, Rc<Structure>>,
     /// Antichains of tricks per layout, for [`Goal::ExactExpected`]
-    memo: HashMap<State, Vec<Tricks>>,
+    memo: FxMap<State, Vec<Tricks>>,
     /// Antichains of 0/1 per layout by tricks still needed, for trick targets
-    memo_t: HashMap<(State, u8), Vec<Tricks>>,
+    memo_t: FxMap<(State, u8), Vec<Set>>,
+    /// [`Structure::map_to`] by the live cards of parent and child
+    maps: FxMap<(u16, u16), Rc<[usize]>>,
     /// [`Goal::Expected`] lines by state and requirement followed
-    memo_line: HashMap<(State, Tricks), (Tricks, Step)>,
+    memo_line: FxMap<(State, Tricks), (Tricks, Step)>,
 }
 
 /// How a [`Goal::Expected`] line goes on from a state
@@ -497,10 +652,11 @@ impl Solver {
             north,
             south,
             missing,
-            structures: HashMap::new(),
-            memo: HashMap::new(),
-            memo_t: HashMap::new(),
-            memo_line: HashMap::new(),
+            structures: FxMap::default(),
+            memo: FxMap::default(),
+            memo_t: FxMap::default(),
+            maps: FxMap::default(),
+            memo_line: FxMap::default(),
         })
     }
 
@@ -511,8 +667,8 @@ impl Solver {
         let widest = self
             .memo
             .values()
-            .chain(self.memo_t.values())
             .map(Vec::len)
+            .chain(self.memo_t.values().map(Vec::len))
             .max()
             .unwrap_or(0);
         (states, widest)
@@ -524,6 +680,18 @@ impl Solver {
                 .entry(live)
                 .or_insert_with(|| Rc::new(Structure::new(self.missing, live))),
         )
+    }
+
+    /// For each layout of `st`, the layout of `ch` it becomes: a cached
+    /// [`Structure::map_to`], as a structure depends only on the live cards
+    fn map(&mut self, st: &State, ch: &State) -> Rc<[usize]> {
+        let key = (st.live(), ch.live());
+        if let Some(map) = self.maps.get(&key) {
+            return Rc::clone(map);
+        }
+        let map: Rc<[usize]> = self.structure(key.0).map_to(&self.structure(key.1)).into();
+        self.maps.insert(key, Rc::clone(&map));
+        map
     }
 
     fn max_tricks(&self) -> u8 {
@@ -569,13 +737,10 @@ impl Solver {
             // A Goal::Expected line follows trick targets' vectors.
             Goal::Tricks { .. } | Goal::Expected => {
                 let need = (0..len).map(|i| req.get(i)).max().unwrap_or(0);
-                let mut req01 = Tricks::ZERO;
-                for i in 0..len {
-                    req01.set(i, u8::from(req.get(i) > 0));
-                }
+                let req: Set = (0..len).filter(|&i| req.get(i) > 0).collect();
                 self.feasible_t(st, need)
                     .iter()
-                    .any(|v| v.covers(&req01, len))
+                    .any(|v| v.covers(&req, len))
             }
         }
     }
@@ -586,28 +751,24 @@ impl Solver {
     fn value(&mut self, st: State, goal: Goal, won: u8) -> (u64, Tricks) {
         let s = self.structure(st.live());
         let c = Self::consistent(&st, &s);
-        let vs = match goal {
-            Goal::Tricks { target } => self.feasible_t(st, target.saturating_sub(won)),
-            Goal::ExactExpected => self.feasible(st),
+        match goal {
+            Goal::Tricks { target } => self
+                .feasible_t(st, target.saturating_sub(won))
+                .into_iter()
+                .map(|v| ((c & v).iter().map(|i| s.weight[i]).sum(), v))
+                .max_by_key(|&(x, _)| x)
+                .map_or((0, Tricks::ZERO), |(x, v)| (x, Self::ones(v))),
+            Goal::ExactExpected => self
+                .feasible(st)
+                .into_iter()
+                .map(|v| (Self::score(&s, c, goal, won, &v), v))
+                .max_by_key(|&(x, _)| x)
+                .unwrap_or((0, Tricks::ZERO)),
             Goal::Expected => {
                 let t = self.line(st, Tricks::ZERO);
-                return (Self::score(&s, c, goal, won, &t), t);
+                (Self::score(&s, c, goal, won, &t), t)
             }
-        };
-        vs.into_iter()
-            .map(|v| {
-                let score = match goal {
-                    Goal::Tricks { .. } => c
-                        .iter()
-                        .filter(|&i| v.get(i) != 0)
-                        .map(|i| s.weight[i])
-                        .sum(),
-                    _ => Self::score(&s, c, goal, won, &v),
-                };
-                (score, v)
-            })
-            .max_by_key(|&(x, _)| x)
-            .unwrap_or((0, Tricks::ZERO))
+        }
     }
 
     /// [`Analysis`] for every target from one trick up to the longer hand's
@@ -851,6 +1012,7 @@ impl Solver {
                     .flat_map(|(ch, _, _)| self.feasible(ch))
                     .collect(),
                 s.len,
+                None,
             )
         } else {
             // The defender routes each layout to its worst legal branch, so a
@@ -863,7 +1025,7 @@ impl Solver {
             }
             let mut acc = vec![start];
             for (_, g, ch, won) in self.defender_moves(&st, &s, c) {
-                let map = s.map_to(&self.structure(ch.live()));
+                let map = self.map(&st, &ch);
                 let bonus = u8::from(won);
                 // Only the branch's legal layouts matter, so project onto
                 // them first: that collapses many continuations into one.
@@ -879,6 +1041,7 @@ impl Solver {
                         })
                         .collect(),
                     s.len,
+                    None,
                 );
                 let mut mask = Tricks::ZERO;
                 for i in g.iter() {
@@ -891,9 +1054,10 @@ impl Solver {
                     next.extend(maximal(
                         sub.iter().map(|y| x.min_on(y, &mask, words)).collect(),
                         s.len,
+                        None,
                     ));
                 }
-                acc = maximal(next, s.len);
+                acc = maximal(next, s.len, Some(&mask));
             }
             acc
         };
@@ -924,7 +1088,7 @@ impl Solver {
         let seat_index = (st.leader + st.played) % 4;
         let mut branches: Vec<(Vec<Option<Rank>>, Plan)> = Vec::new();
         for (class, g, ch, won) in self.defender_moves(&st, &s, c) {
-            let map = s.map_to(&self.structure(ch.live()));
+            let map = self.map(&st, &ch);
             let mut sub_req = Tricks::ZERO;
             let mut wanted = false;
             for i in g.iter() {
@@ -1127,7 +1291,7 @@ impl Game {
             let outcome = match self.goal {
                 Goal::Tricks { target } => {
                     let vs = solver.feasible_t(ch, target.saturating_sub(won));
-                    vs.iter().any(|v| v.get(layout) != 0).into()
+                    vs.iter().any(|v| v.contains(layout)).into()
                 }
                 Goal::ExactExpected => {
                     let vs = solver.feasible(ch);
@@ -1136,7 +1300,7 @@ impl Game {
                 // The most tricks declarer could be sure of on this layout,
                 // which the 0/1 searches answer exactly
                 Goal::Expected => (1..)
-                    .take_while(|&k| solver.feasible_t(ch, k).iter().any(|v| v.get(layout) != 0))
+                    .take_while(|&k| solver.feasible_t(ch, k).iter().any(|v| v.contains(layout)))
                     .count() as u8,
             };
             let key = (outcome, solver.value(ch, self.goal, won).0);
@@ -1146,7 +1310,7 @@ impl Game {
         }
         let (_, m) = best.expect("a defender can always follow or show out");
         let (class, g, ch, trick) = moves[m];
-        let map = s.map_to(&solver.structure(ch.live()));
+        let map = solver.map(&st, &ch);
         self.reqs = self
             .reqs
             .iter()
@@ -1213,74 +1377,73 @@ impl Solver {
         v
     }
 
-    /// Pareto-maximal 0/1 vectors (over the layouts consistent with `st`):
-    /// 1 where some continuation guarantees at least `need` more tricks.
-    /// The same search as [`feasible`](Self::feasible) on vectors collapsed
-    /// to a threshold: min and union commute with it, so the answer is
-    /// exact, and the antichains stay small where the full ones explode.
-    fn feasible_t(&mut self, st: State, need: u8) -> Vec<Tricks> {
+    /// Pareto-maximal 0/1 vectors, as sets of layouts (of those consistent
+    /// with `st`) where some continuation guarantees at least `need` more
+    /// tricks.  The same search as [`feasible`](Self::feasible) on vectors
+    /// collapsed to a threshold: min and union commute with it, so the
+    /// answer is exact, and the antichains stay small where the full ones
+    /// explode.
+    fn feasible_t(&mut self, st: State, need: u8) -> Vec<Set> {
         let s = self.structure(st.live());
         let c = Self::consistent(&st, &s);
         if need == 0 {
-            return vec![Self::ones(c)];
+            return vec![c];
         }
         let remaining =
             st.ns[0].count_ones().max(st.ns[1].count_ones()) as u8 + u8::from(st.played > 0);
         if need > remaining {
-            return vec![Tricks::ZERO];
+            return vec![Set::EMPTY];
         }
         if let Some(v) = self.memo_t.get(&(st, need)) {
             return v.clone();
         }
         let out = if Self::is_declarer_turn(&st) {
             let moves = self.declarer_moves(&st, &s);
-            maximal(
+            maximal_sets(
                 moves
                     .into_iter()
                     .flat_map(|(ch, _, _)| self.feasible_t(ch, need))
                     .collect(),
                 s.len,
+                None,
             )
         } else {
-            let mut acc = vec![Self::ones(c)];
+            let mut acc = vec![c];
             for (_, g, ch, won) in self.defender_moves(&st, &s, c) {
                 let sub_need = need - u8::from(won);
                 if sub_need == 0 {
                     continue;
                 }
-                let map = s.map_to(&self.structure(ch.live()));
-                let sub = maximal(
+                let map = self.map(&st, &ch);
+                let sub = maximal_sets(
                     self.feasible_t(ch, sub_need)
                         .iter()
-                        .map(|y| {
-                            let mut p = Tricks::ZERO;
-                            for i in g.iter() {
-                                p.set(i, y.get(map[i]));
-                            }
-                            p
-                        })
+                        .map(|y| g.iter().filter(|&i| y.contains(map[i])).collect())
                         .collect(),
                     s.len,
+                    None,
                 );
-                let mut mask = Tricks::ZERO;
-                for i in g.iter() {
-                    mask.set(i, 0xFF);
-                }
-                let words = s.len.div_ceil(8);
                 let mut next = Vec::new();
-                for x in &acc {
-                    next.extend(maximal(
-                        sub.iter().map(|y| x.min_on(y, &mask, words)).collect(),
+                for &x in &acc {
+                    // min on the branch's layouts: x loses those y lacks
+                    next.extend(maximal_sets(
+                        sub.iter().map(|&y| x - (g - y)).collect(),
                         s.len,
+                        None,
                     ));
                 }
-                acc = maximal(next, s.len);
+                // ponytail: grouping skips the tests that cannot succeed, not
+                // the rows; where the antichain itself explodes (KJ9753 -
+                // for 3 tricks: 700k vectors at one node) the next lever is
+                // sharing rows between equal `x ∩ g`, or pruning the moves.
+                acc = maximal_sets(next, s.len, Some(&g));
             }
             acc
         };
         self.memo_t.insert((st, need), out.clone());
         out
     }
+
     /// Each trick target's optimal vector from `st`, in tricks still needed
     /// on the layouts it wins, for every target some layout can still reach
     fn adopt(&mut self, st: State, c: Set) -> Vec<Tricks> {
@@ -1357,7 +1520,7 @@ impl Solver {
                 t.set(i, 127);
             }
             for (_, g, ch, won) in self.defender_moves(&st, &s, c) {
-                let map = s.map_to(&self.structure(ch.live()));
+                let map = self.map(&st, &ch);
                 let sub = self.line(ch, Self::pass(&req, g, &map, won));
                 for i in g.iter() {
                     t.set(i, t.get(i).min(sub.get(map[i]) + u8::from(won)));
@@ -1412,7 +1575,7 @@ impl Solver {
             Step::Branch => {
                 let mut branches = Vec::new();
                 for (class, g, ch, won) in self.defender_moves(&st, &s, c) {
-                    let map = s.map_to(&self.structure(ch.live()));
+                    let map = self.map(&st, &ch);
                     let sub_req = Self::pass(&req, g, &map, won);
                     let sub = if self.line(ch, sub_req) == Tricks::ZERO {
                         Plan::Hopeless
@@ -1426,6 +1589,87 @@ impl Solver {
                     branches,
                 }
             }
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// xorshift64
+    fn next(x: &mut u64) -> u64 {
+        *x ^= *x << 13;
+        *x ^= *x >> 7;
+        *x ^= *x << 17;
+        *x
+    }
+
+    /// `n` random subsets of a few random sets over `len` lanes, so that
+    /// many dominate others and some repeat
+    fn sets(x: &mut u64, n: usize, len: usize) -> Vec<Set> {
+        let bases: Vec<Set> = (0..4)
+            .map(|_| (0..len).filter(|_| !next(x).is_multiple_of(4)).collect())
+            .collect();
+        (0..n)
+            .map(|_| {
+                let base = bases[next(x) as usize % 4];
+                (0..len)
+                    .filter(|&i| base.contains(i) && !next(x).is_multiple_of(8))
+                    .collect()
+            })
+            .collect()
+    }
+
+    #[test]
+    fn sets_reduce_like_tricks() {
+        let mut x = 1;
+        for len in [3, 9, 64, 65, 108, 256] {
+            let vs = sets(&mut x, 300, len);
+            let tricks = vs.iter().map(|&v| Solver::ones(v)).collect();
+            let got: Vec<Tricks> = maximal_sets(vs, len, None)
+                .into_iter()
+                .map(Solver::ones)
+                .collect();
+            assert_eq!(got, maximal(tricks, len, None));
+        }
+    }
+
+    #[test]
+    fn grouping_changes_nothing() {
+        let mut x = 7;
+        for len in [9, 64, 108, 256] {
+            let g: Set = (0..len)
+                .filter(|_| !next(&mut x).is_multiple_of(3))
+                .collect();
+            let acc = sets(&mut x, 20, len);
+            let sub = sets(&mut x, 20, len);
+            let mut rows: Vec<Set> = sets(&mut x, 50, len);
+            for &a in &acc {
+                rows.extend(sub.iter().map(|&y| a - (g - y)));
+            }
+            let plain = maximal_sets(rows.clone(), len, None);
+            assert_eq!(maximal_sets(rows, len, Some(&g)), plain);
+
+            let mut mask = Tricks::ZERO;
+            for i in g.iter() {
+                mask.set(i, 0xFF);
+            }
+            let lanes = |x: &mut u64| {
+                let mut t = Tricks::ZERO;
+                for i in 0..len {
+                    t.set(i, (next(x) % 4) as u8);
+                }
+                t
+            };
+            let acc: Vec<Tricks> = (0..20).map(|_| lanes(&mut x)).collect();
+            let sub: Vec<Tricks> = (0..20).map(|_| lanes(&mut x)).collect();
+            let mut rows: Vec<Tricks> = (0..50).map(|_| lanes(&mut x)).collect();
+            for a in &acc {
+                rows.extend(sub.iter().map(|y| a.min_on(y, &mask, len.div_ceil(8))));
+            }
+            let plain = maximal(rows.clone(), len, None);
+            assert_eq!(maximal(rows, len, Some(&mask)), plain);
         }
     }
 }
