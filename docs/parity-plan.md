@@ -38,7 +38,7 @@ targets; double-dummy averages are upper bounds, not policies.
 | Entries and play | Unlimited entries, no ruffs by default; for trick targets, the starting hand, finite entries, round limits, a fixed first card, discards and one side's ruffs (`Constraints`) | None of these for EV; no overruffs |
 | Alternative lines | Values for every equivalent opening lead; one plan per goal | No line browser, line-by-layout matrix or comparison |
 | Goals | At-least-N, bounded EV, exact EV | No MP/IMP line comparison |
-| Coverage | At most eight missing cards (`TooManyMissing`) | `AQ / 2` is rejected |
+| Coverage | Any holding: the limit is 256 layouts after merging interchangeable cards (at most 162 for any holding); only many known cards or an HCP range exceed it (`TooManyMissing`) | Over-limit constraint combinations are rejected, not solved |
 | Interface | Browser trainer, custom holdings, card grading, revealable tree, CLI, serializable Rust API | No analysis-first view, free defender branching, sharing or export |
 | Runtime control | Worker termination; random-deal and exact-EV budgets | No engine budget, retained progress or memory contract |
 | Validation | 44 reference cases in [tests/fixtures/cases.json](../tests/fixtures/cases.json) (SuitC, Todd, Pavlicek, hand derivations); a policy evaluator ([tests/fixtures.rs](../tests/fixtures.rs)) replays every plan on every layout against every legal defence; a seeded 116-combination corpus run by [examples/bench.rs](../examples/bench.rs); CI runs tests and the corpus | Published numbers exist for few cases (Pavlicek states plays, not percentages); no uncompressed oracle beyond the evaluator; corpus timings from one machine |
@@ -64,7 +64,7 @@ analysis time of one native release run; spot checks, not percentiles.
 | `KQ85 / T73`, >=3 | 24.55% | 89 ms |
 | `KQ85 / T73`, >=2 | none | timeout at 30 s |
 | `Q876 / AT32`, exact EV | 2.616 | 15 ms; fast mode found it but its 2.644 bound did not prove it |
-| `AQ / 2`, >=2 | `TooManyMissing` | panic in the example CLI |
+| `AQ / 2`, >=2 | `TooManyMissing` | panic in the example CLI (2026-10-18: 50.00%, 76 µs) |
 
 The README's 600-case EV study is not reproducible from tracked files (no
 seed, harness or raw results). Competitors were not run or timed here.
@@ -274,6 +274,26 @@ each (63.00%), the evaluator, and the oracle sweep with random ruffs on
 one side; mutants (no defender ruff, no declarer ruff, ruffs unspent, a
 ruff that loses) are caught. Defaults byte-identical, same speed.
 
+Item 4: the limit is now 256 layouts after interchangeable cards merge,
+not eight missing cards (`MAX_LAYOUTS` replaces `MAX_MISSING`). Every
+holding fits: twelve missing cards make at most 162 layouts, as declarer's
+few cards separate few classes. Only known cards or an HCP range, which
+make cards classes of their own, can pass 256; those problems, and no card
+held at all, are `TooManyMissing`. The root has the finest layout space,
+so it alone is checked, and 256 layouts allow at most 8 classes, so
+`State` keeps its size. `AQ / 2` solves (50.00%, 76 µs). Checked by
+hand-derived fixtures with 9 to 13 missing or none (`AQ / 2`, `AKJ / 2`,
+`K2 / 3`, `AKQ / -`, `A / -`, all thirteen cards), the oracle on the
+reference cases without the old skip, and a new sweep of 240 random
+combinations with 9 to 12 missing, half under random constraints other
+than known cards and HCP (most of those pass 256 layouts); the oracle
+skips 5 whose antichains pass 2,000 vectors. The corpus generator now
+covers 4 to 12 missing (31 new combinations; old lines unchanged): 138
+runs, p50 0.2 ms, p95 2.5 ms, max 16 ms, all proven. Defaults with at
+most eight missing are byte-identical.
+
+**Status:** phase 3 done.
+
 **Done:** each option matches independent target examples; defaults
 reproduce phase 1; `AQ / 2` solves; unsupported option combinations,
 including a new option with an expected-tricks goal, are rejected clearly.
@@ -328,9 +348,8 @@ for the measured scope.
 
 ## Next step and exclusions
 
-Phase 3, item 4: lift the eight-missing-card limit for ordinary holdings
-(`AQ / 2` must solve), sizing representations by the compressed layout
-space.
+Phase 4, item 1: retire the fast `Expected` mode; `ExactExpected` becomes
+the one EV goal.
 
 Not needed: rewrite, server backend, new framework, GPU search, full-deal AI,
 bidding inference. Mixed-strategy equilibria are a separate research question.

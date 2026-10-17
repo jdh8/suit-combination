@@ -60,15 +60,22 @@ use std::rc::Rc;
 /// `C(26, 13)`: the denominator of every probability without [`Constraints`]
 pub const TOTAL: u64 = 10_400_600;
 
-/// Most missing cards supported (layout sets are 256-bit)
-pub const MAX_MISSING: usize = 8;
+/// Most layouts supported once interchangeable missing cards are merged
+/// (layout sets are 256-bit).  Every holding fits (twelve missing cards
+/// make at most 162); only known cards or HCP ranges, which tell missing
+/// cards apart, can exceed it.
+pub const MAX_LAYOUTS: usize = 256;
+
+/// Most classes of missing cards: each at least doubles the layouts
+const MAX_CLASSES: usize = MAX_LAYOUTS.ilog2() as usize;
 
 /// Why a problem cannot be analyzed
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Error {
     /// North and South hold a card in common
     Overlap,
-    /// More than [`MAX_MISSING`] cards missing
+    /// More than [`MAX_LAYOUTS`] layouts of the missing cards, or all 13
+    /// missing
     TooManyMissing,
     /// Target exceeds the longer hand or [`Constraints::rounds`] (or is zero)
     BadTarget,
@@ -98,7 +105,9 @@ impl fmt::Display for Error {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.write_str(match self {
             Self::Overlap => "North and South share a card",
-            Self::TooManyMissing => "more than 8 cards missing",
+            Self::TooManyMissing => {
+                "too many missing cards told apart (more than 256 layouts), or no card held"
+            }
             Self::BadTarget => "target must be 1..=longer hand and at most the rounds",
             Self::BadWest => "West holds a card of North or South",
             Self::NotPlayable => "that card cannot be played now",
@@ -399,10 +408,10 @@ impl FromIterator<usize> for Set {
 /// Tricks declarer is guaranteed from here, per layout (0 outside the
 /// layouts consistent with the state); eight layouts per word
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
-struct Tricks([u64; 1 << MAX_MISSING >> 3]);
+struct Tricks([u64; MAX_LAYOUTS / 8]);
 
 impl Tricks {
-    const ZERO: Self = Self([0; 1 << MAX_MISSING >> 3]);
+    const ZERO: Self = Self([0; MAX_LAYOUTS / 8]);
     /// High bit of every byte lane
     const H: u64 = 0x8080_8080_8080_8080;
 
@@ -592,7 +601,7 @@ struct State {
     ns: [u16; 2],
     /// Cards already played by East, West, as a count per class of the
     /// state's [`Structure`]
-    shown: [[u8; MAX_MISSING]; 2],
+    shown: [[u8; MAX_CLASSES]; 2],
     /// East, West have shown out
     void: [bool; 2],
     /// Seat that led the current trick (NORTH when between tricks)
@@ -707,7 +716,9 @@ fn vacancy(vacant: [u8; 2], n: u64, w: u64) -> u64 {
 }
 
 impl Structure {
-    fn new(missing: u16, live: u16, c: &Constraints) -> Self {
+    /// The classes of the `missing` cards with `live` declarer cards, and
+    /// the number of layouts they make
+    fn classes(missing: u16, live: u16, c: &Constraints) -> (Vec<Class>, usize) {
         let [east, west] = c.known.map(Holding::to_bits);
         let honours = if c.splits_honours() {
             missing & 0xF << 11
@@ -741,6 +752,12 @@ impl Structure {
                 cur = 0;
             }
         }
+        (classes, len)
+    }
+
+    fn new(missing: u16, live: u16, c: &Constraints) -> Self {
+        let [east, west] = c.known.map(Holding::to_bits);
+        let (classes, len) = Self::classes(missing, live, c);
         let count = |i: usize, c: &Class| i / c.stride % (usize::from(c.size) + 1);
         // A known card's class holds it on its side: West count 1 or 0
         let fits = |i: usize, c: &Class| {
@@ -1001,7 +1018,7 @@ impl Solver {
             return Err(Error::Overlap);
         }
         let missing = (Holding::ALL - north - south).to_bits();
-        if missing.count_ones() as usize > MAX_MISSING {
+        if (north | south).is_empty() {
             return Err(Error::TooManyMissing);
         }
         let [east, west] = constraints.known.map(Holding::to_bits);
@@ -1037,6 +1054,10 @@ impl Solver {
             dd: None,
         };
         let root = solver.root();
+        // The root has the most live cards, so the finest layout space
+        if Structure::classes(missing, root.live(), &constraints).1 > MAX_LAYOUTS {
+            return Err(Error::TooManyMissing);
+        }
         let leadable = |r: Rank| {
             let r = r.get();
             (0..2).any(|h| root.ns[h] >> r & 1 != 0 && root.may_lead(h))
@@ -1157,7 +1178,7 @@ impl Solver {
         let unlimited = u8::from(entries[0] == UNLIMITED) | u8::from(entries[1] == UNLIMITED) << 1;
         State {
             ns,
-            shown: [[0; MAX_MISSING]; 2],
+            shown: [[0; MAX_CLASSES]; 2],
             void: [false; 2],
             leader: NORTH,
             trick: [0; 4],
@@ -1509,7 +1530,7 @@ impl Solver {
         let coarse = self.structure(st.live());
         if coarse.classes.len() != s.classes.len() {
             let shown = st.shown;
-            st.shown = [[0; MAX_MISSING]; 2];
+            st.shown = [[0; MAX_CLASSES]; 2];
             for (k, c) in s.classes.iter().enumerate() {
                 let to = coarse.class_of(lowest(c.ranks));
                 for (d, shown) in shown.iter().enumerate() {

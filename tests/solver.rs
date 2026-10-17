@@ -221,9 +221,20 @@ fn errors() {
     let h = |s: &str| s.parse::<Holding>().unwrap();
     let t = |target| Goal::Tricks { target };
     assert_eq!(analyze(h("AK"), h("A2"), t(1)).unwrap_err(), Error::Overlap);
+    // Nine missing cards are fine; no card held, or too many missing cards
+    // told apart (nine known singletons make 2^9 x 3 layouts), are not
+    assert_eq!(tricks("AK", "32", 2), TOTAL);
     assert_eq!(
-        analyze(h("AK"), h("32"), t(1)).unwrap_err(),
+        analyze(Holding::EMPTY, Holding::EMPTY, t(1)).unwrap_err(),
         Error::TooManyMissing
+    );
+    let known = Constraints {
+        known: [h("8765"), h("KQJT9")],
+        ..Constraints::default()
+    };
+    assert_eq!(
+        Solver::with_constraints(h("A"), h("2"), known).err(),
+        Some(Error::TooManyMissing)
     );
     assert_eq!(
         analyze(h("AKQ"), h("32"), t(4)).unwrap_err(),

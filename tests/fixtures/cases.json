@@ -380,5 +380,35 @@
     "north": "KQT32", "south": "654", "goal": 2, "ruffs": [0, 1, 0, 1], "value": 0.6300, "tolerance": 0.00005,
     "source": "SuitC User Guide 9, pp. 3-4: each defender may ruff once; the guide prints the line's tricks per layout class, which give 63.00 percent for two tricks (the same table without ruffs reproduces the guide's 55.39/89.57/98.04 percent)",
     "checked": "2026-10-18", "note": "Decoded from the published table; SuitC's probe agrees"
+  },
+  {
+    "north": "AQ", "south": "2", "goal": 2, "score": 5200300, "leads": ["2"], "avoid": ["A"],
+    "source": "Hand derivation: ten missing cards; the finesse wins whenever West holds the K: C(25, 12). The A first drops only a singleton K: C(16, 12) + C(16, 4) = 3640",
+    "checked": "2026-10-18", "note": "The plan's coverage example"
+  },
+  {
+    "north": "AKJ", "south": "2", "goal": 3, "score": 5200300, "leads": ["2"], "avoid": ["A"],
+    "source": "Hand derivation: nine missing cards and one lead from South: the finesse wins whenever West holds the Q: C(25, 12); A and K drop only Q or Qx on either side: 2 (C(17, 12) + 8 C(17, 11)) = 210392",
+    "checked": "2026-10-18"
+  },
+  {
+    "north": "K2", "south": "3", "goal": 1, "score": 5200300, "leads": ["3"],
+    "source": "Hand derivation: ten missing cards; toward the K wins whenever West holds the A: C(25, 12). Ducking instead wins only East's singleton A",
+    "checked": "2026-10-18"
+  },
+  {
+    "north": "AKQ", "south": "-", "goal": 3, "score": 10400600,
+    "source": "Hand derivation: three top tricks opposite a void, ten missing cards",
+    "checked": "2026-10-18"
+  },
+  {
+    "north": "A", "south": "-", "goal": 1, "score": 10400600,
+    "source": "Hand derivation: the A alone, twelve missing cards",
+    "checked": "2026-10-18"
+  },
+  {
+    "north": "AKQJT98765432", "south": "-", "goal": 13, "score": 10400600,
+    "source": "Hand derivation: every card of the suit, nothing missing",
+    "checked": "2026-10-18"
   }
 ]

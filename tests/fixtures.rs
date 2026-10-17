@@ -275,8 +275,13 @@ fn evaluate(a: &Analysis, c: &Constraints) -> u64 {
     }
 }
 
+/// A holding as text, `-` for a void
 fn holding(s: &str) -> Holding {
-    s.parse().unwrap()
+    if s == "-" {
+        Holding::EMPTY
+    } else {
+        s.parse().unwrap()
+    }
 }
 
 fn lead_score(a: &Analysis, rank: &str) -> u64 {

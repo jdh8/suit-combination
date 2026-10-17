@@ -26,7 +26,9 @@ which is exact but can take seconds.
 
 Assumptions, as in Pavlicek's card-combination tables: unlimited entries to
 both hands, no ruffs, no inference about the enemy hands, only tricks in this
-suit count.  Up to 8 missing cards.  For trick targets, `Constraints` set
+suit count.  Any number of missing cards: the limit is 256 layouts once
+interchangeable cards merge, which every holding meets (at most 162) and only
+many known cards or an HCP range can break.  For trick targets, `Constraints` set
 other vacant places, cards known to be with East or West, length and HCP
 ranges, the hand the lead starts in, finite entries, a limit on rounds, a
 fixed first card, discards and ruffs.
@@ -116,7 +118,7 @@ cargo run --release --example solve -- KQ85 T73 --budget 1  # each goal 1 s
 
 The CLI prints each goal as `proven`, as `best <= x` when the line found is
 not proven best, or as `interrupted (best <= x)` when the budget ran out.
-Bad holdings and unsupported problems (more than 8 cards missing) exit with
+Bad holdings and unsupported problems (more than 256 layouts) exit with
 status 2 and a message.
 
 ## Evidence

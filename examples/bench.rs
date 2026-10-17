@@ -5,7 +5,7 @@
 //! cargo run --release --example bench -- run [CORPUS] [TIMEOUT_SECS] > results.tsv
 //! ```
 //!
-//! `gen` samples one combination per stratum (missing cards 4..=8, North's
+//! `gen` samples one combination per stratum (missing cards 4..=12, North's
 //! length, missing honours among AKQJ), then appends the known slow cases.
 //! `run` solves every combination for each trick target, the fast expected
 //! line (`ev`) and the exact search (`exact`), one process per run so a
@@ -53,10 +53,11 @@ fn generate(seed: u64) {
         x
     };
     let honours: u16 = 0b111_1000_0000_0000; // AKQJ
-    for missing in 4..=8u32 {
+    for missing in 4..=12u32 {
         let declarer = 13 - missing;
         for north_len in declarer.div_ceil(2)..=declarer {
-            for h in 0..=missing.min(4) {
+            // Declarer holds at most `declarer` of the honours
+            for h in 4u32.saturating_sub(declarer)..=missing.min(4) {
                 loop {
                     let mut deck: Vec<u8> = (2..15).collect();
                     for i in (1..deck.len()).rev() {

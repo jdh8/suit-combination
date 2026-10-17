@@ -683,7 +683,7 @@ fn check_all(
     assert!(combos.iter().any(|c| short(c) == 1), "no singleton");
     let start = std::time::Instant::now();
     let next = AtomicUsize::new(0);
-    let results = Mutex::new((Vec::new(), 0, 0, Vec::new()));
+    let results = Mutex::new((Vec::new(), 0, 0, Vec::new(), 0));
     let threads = std::thread::available_parallelism().map_or(1, usize::from);
     std::thread::scope(|scope| {
         for _ in 0..threads {
@@ -691,6 +691,17 @@ fn check_all(
                 while let Some(&(n, s)) = combos.get(next.fetch_add(1, Ordering::Relaxed)) {
                     let t = std::time::Instant::now();
                     let c = constrain(n, s);
+                    // Over 256 layouts: only cards told apart by known
+                    // cards or an HCP range can get there
+                    if Solver::with_constraints(n, s, c).err() == Some(Error::TooManyMissing) {
+                        let d = Constraints::default();
+                        let mut r = results.lock().unwrap();
+                        if c.known == d.known && c.hcp == d.hcp {
+                            r.0.push(format!("{} {c:?}: too many layouts?", name(n, s)));
+                        }
+                        r.4 += 1;
+                        continue;
+                    }
                     let mut oracle = Oracle::new(n, s, Rules::constrained(n, s, c));
                     oracle.limit = limit;
                     if oracle.declarer_moves(&oracle.root()).is_empty() {
@@ -727,12 +738,15 @@ fn check_all(
             });
         }
     });
-    let (fails, checks, states, skipped) = results.into_inner().unwrap();
+    let (fails, checks, states, skipped, layouts) = results.into_inner().unwrap();
     eprintln!(
         "{} combinations, {checks} numbers compared, {states} oracle states, {:?}",
-        combos.len() - skipped.len(),
+        combos.len() - skipped.len() - layouts,
         start.elapsed()
     );
+    if layouts > 0 {
+        eprintln!("{layouts} past 256 layouts, rejected by the engine");
+    }
     if !skipped.is_empty() {
         eprintln!("skipped past {limit} vectors: {skipped:?}");
     }
@@ -825,6 +839,30 @@ fn random_constraints(north: Holding, south: Holding) -> Constraints {
 
 #[test]
 #[cfg_attr(debug_assertions, ignore = "slow unoptimized: run with --release")]
+fn oracle_agrees_on_many_missing_cards() {
+    // ponytail: up to 4096 uncompressed lanes; the oracle skips the
+    // combinations whose antichains pass LIMIT vectors
+    const LIMIT: usize = 2_000;
+    check_all(
+        &random_combos(120, 9, 12, 0x6A09_E667_F3BC_C908),
+        LIMIT,
+        |_, _| Constraints::default(),
+    );
+    // Known cards and HCP ranges tell so many cards apart that most pass
+    // 256 layouts; keep the rest of the constraints
+    check_all(
+        &random_combos(120, 9, 12, 0xBB67_AE85_84CA_A73B),
+        LIMIT,
+        |n, s| Constraints {
+            known: Constraints::default().known,
+            hcp: Constraints::default().hcp,
+            ..random_constraints(n, s)
+        },
+    );
+}
+
+#[test]
+#[cfg_attr(debug_assertions, ignore = "slow unoptimized: run with --release")]
 fn oracle_agrees_under_constraints() {
     check_all(
         &random_combos(200, 3, 7, 0xD1B5_4A32_D192_ED03),
@@ -846,9 +884,8 @@ fn oracle_agrees_on_more_combinations() {
     );
 }
 
-/// The reference cases with at most eight missing cards (today's engine
-/// limit; each solves in under a second): the oracle agrees with the
-/// engine, and on its own with the published values and plays
+/// The reference cases: the oracle agrees with the engine, and on its own
+/// with the published values and plays
 #[test]
 #[cfg_attr(debug_assertions, ignore = "slow unoptimized: run with --release")]
 fn oracle_agrees_on_reference_cases() {
@@ -897,9 +934,6 @@ fn oracle_agrees_on_reference_cases() {
             ruffs: c.ruffs.unwrap_or(d.ruffs),
         };
         let combo = (holding(&c.north), holding(&c.south), constraints);
-        if 13 - combo.0.len() - combo.1.len() > 8 {
-            continue;
-        }
         if !solved.iter().any(|(k, _)| *k == combo) {
             let o = Solved::with(
                 combo.0,
