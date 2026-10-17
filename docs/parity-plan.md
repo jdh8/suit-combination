@@ -220,23 +220,29 @@ with honour splitting or the length filter removed. Defaults byte-identical
 again on 3,000 combinations and 400 exact. Not yet: the wasm and UI
 surfaces (phase 5).
 
-A forced first leader and finite entries are in too (`Constraints::first`,
-`Constraints::entries`, CLI `--first`/`--entries`). The rule is SuitPlay's,
-for both hands: a hand leads free if it won the last round of the suit, or
-leads the first round as the forced leader; otherwise the lead takes one of
-its entries. After a defender wins a round they switch suits, so either
-hand needs an entry. A problem with no legal first lead (a void forced
-leader, no entries anywhere) is `BadConstraints`. `State` carries the hands
-that lead free and the entries left; with unlimited entries both stay
-constant, so defaults search the same states. Checked by seven
-hand-derived fixtures (`AQJT / 32` for four tricks: 18.17% free, 4.84%
-with one entry to South, 0.97% with none or when North must lead first;
-`AKQ2 / J` blocked, unblocked by one North entry), the evaluator, which
-now enforces the entry rule itself, and the oracle sweep with a random
-first leader and 0-2 entries per hand; the sweep fails with entries never
-spent, a free lead after a defender's trick, or the first leader not
-forced. Defaults byte-identical on 3,000 combinations and 400 exact, at the
-same speed.
+The hand the lead starts in and finite entries are in too
+(`Constraints::first`, `Constraints::entries`, CLI `--first`/`--entries`).
+A hand leads free if it won the last round of the suit, or leads the first
+round from where the lead starts (either hand if none is named); otherwise
+the lead takes one of its entries. After a defender wins a round they
+switch suits, so either hand needs an entry. This is SuitPlay's rule for
+both hands, and SuitC's and CCAnalyser's "on lead": not a forced leader,
+only "relevant if entries are limited" (CCAnalyser), and with no hand on
+lead SuitC lets either lead first free. A problem with no legal first lead
+(a void starting hand and no entry to the other) is `BadConstraints`.
+`State` carries the hands that lead free and the entries left; with
+unlimited entries both stay constant, so defaults search the same states.
+Checked by CCAnalyser's published entry examples (`AQJT / 65432`, 8/11
+vacant places, lead in South, two South entries: 40.30%, and 95.71% with
+East at 0 HCP; its per-lead values agree too), hand derivations (that
+holding with one to three South entries; `AQJT / 32`, `AQJ / 432`,
+`AQ / 432`, `AKQ2 / 543`; `AKQ2 / J` blocked, unblocked by one North entry),
+the evaluator, which enforces the entry rule itself, and the oracle sweep
+with a random starting hand and 0-2 entries per hand; the sweep fails with
+entries never spent, a free lead after a defender's trick, an unnamed first
+lead charged, or a named one ignored. SuitC's probe values for `AJT / 432`
+(32.96%, 76.00%) agree but are not fixtures. Defaults byte-identical on
+3,000 combinations and 400 exact, at the same speed.
 
 **Done:** each option matches independent target examples; defaults
 reproduce phase 1; `AQ / 2` solves; unsupported option combinations,

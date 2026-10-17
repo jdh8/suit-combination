@@ -8,7 +8,7 @@
 //! sets the defenders' vacant places, `--east` and `--west` the cards known
 //! to be with them, `--length` and `--hcp` (this suit only) ranges such as
 //! `3`, `2-4`, `-2`, `3-` or `-` for any, e.g. `--length -,-1`.  `--first`
-//! names the hand that must lead first, `--entries` each hand's entries in
+//! names the hand the lead starts in, `--entries` each hand's entries in
 //! other suits, `-` for unlimited, e.g. `--entries -,1`.  Only trick targets
 //! take these.
 

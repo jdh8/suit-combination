@@ -81,7 +81,8 @@ pub enum Error {
     Interrupted { bound: u64, total: u64 },
     /// Known cards that are not missing or are with both defenders, more
     /// than 13 vacant places, a first leader not North or South, or no hand
-    /// able to lead the first round
+    /// able to lead the first round (a void [`Constraints::first`] and no
+    /// entry to the other hand)
     BadConstraints,
     /// No layout fits the [`Constraints`]
     NoLayout,
@@ -213,11 +214,12 @@ pub struct Constraints {
     /// Fewest and most high-card points (A 4, K 3, Q 2, J 1) East, West hold
     /// in this suit; the other suits are not modelled
     pub hcp: [[u8; 2]; 2],
-    /// Hand that must lead the first round, North or South; `None`: either
+    /// Hand the lead starts in, North or South; `None`: either.  Only
+    /// limited [`entries`](Self::entries) make it matter.
     pub first: Option<Seat>,
     /// Entries to North, South in other suits; `None`: unlimited.  A hand
     /// leads free if it won the last round of the suit, or leads the first
-    /// round as [`first`](Self::first); otherwise leading from it takes an
+    /// round from [`first`](Self::first); otherwise leading from it takes an
     /// entry.  After a defender wins a round, either hand needs one.
     pub entries: [Option<u8>; 2],
 }
@@ -571,14 +573,11 @@ struct State {
     trick: [u8; 4],
     played: u8,
     /// Between tricks, the hands that may lead without an entry (bit 0
-    /// North, bit 1 South), plus [`BARRED`] if no other hand may; 0 in a trick
+    /// North, bit 1 South); 0 in a trick
     lead: u8,
     /// Entries left to North, South; [`UNLIMITED`] never runs out
     entries: [u8; 2],
 }
-
-/// [`State::lead`]: only the hands named may lead (the forced first leader)
-const BARRED: u8 = 4;
 
 /// [`State::entries`] of a hand with unlimited entries
 const UNLIMITED: u8 = u8::MAX;
@@ -587,8 +586,7 @@ impl State {
     /// Between tricks, hand `h` (0 North, 1 South) has a card and may lead
     /// it: free, or by an entry
     fn may_lead(&self, h: usize) -> bool {
-        self.ns[h] != 0
-            && (self.lead >> h & 1 != 0 || self.lead & BARRED == 0 && self.entries[h] > 0)
+        self.ns[h] != 0 && (self.lead >> h & 1 != 0 || self.entries[h] > 0)
     }
 
     /// Between tricks and no hand may lead: the suit is over for declarer
@@ -1095,9 +1093,9 @@ impl Solver {
             trick: [0; 4],
             played: 0,
             lead: match self.constraints.first {
-                Some(Seat::North) => 1 | BARRED,
-                Some(Seat::South) => 2 | BARRED,
-                _ => unlimited,
+                Some(Seat::North) => 1 | unlimited,
+                Some(Seat::South) => 2 | unlimited,
+                _ => 3,
             },
             entries,
         }

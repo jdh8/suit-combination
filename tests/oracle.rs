@@ -85,14 +85,10 @@ impl Rules {
                 let shift = 2 * hand; // 0 for North, 4 for South
                 let left = e >> shift & 15;
                 let free = match winner {
-                    None => first == Some(hand),
+                    None => first.is_none_or(|f| f == hand),
                     Some(w) => w == hand,
                 };
-                if free {
-                    Some(e)
-                } else if winner.is_none() && first.is_some() {
-                    None
-                } else if left == 15 {
+                if free || left == 15 {
                     Some(e)
                 } else {
                     left.checked_sub(1).map(|l| e & !(15 << shift) | l << shift)
@@ -715,7 +711,7 @@ fn oracle_agrees_on_random_small_combinations() {
 /// Random vacant places from 4 to 13; for each missing card, one chance in
 /// three that it is known to be with East or West; even chances of a random
 /// length range and of a random HCP range for one defender; a random first
-/// leader or none, and for each declarer hand even chances of 0 to 2
+/// lead or none, and for each declarer hand even chances of 0 to 2
 /// entries; seeded by the combination; sometimes no layout fits
 fn random_constraints(north: Holding, south: Holding) -> Constraints {
     let mut x = u64::from(north.to_bits()) << 16 | u64::from(south.to_bits()) | 1 << 40;

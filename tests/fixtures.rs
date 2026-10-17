@@ -92,10 +92,8 @@ struct Pos {
     played: usize,
     won: u8,
     /// Hands that may lead the next trick without an entry: the one that
-    /// won the last trick, or the forced first leader
+    /// won the last trick, or the one the lead starts in (either if none)
     free: [bool; 2],
-    /// Only a free hand may lead (the first trick's forced leader)
-    barred: bool,
     /// Outside entries left to North, South; `None` = unlimited
     entries: [Option<u8>; 2],
 }
@@ -104,13 +102,11 @@ impl Pos {
     /// Declarer's hand `h` (0 North, 1 South) leads, spending an entry
     /// unless it may lead free
     fn lead(&mut self, h: usize) {
-        if !self.free[h] {
-            assert!(!self.barred, "the other hand must lead first");
-            if let Some(e) = &mut self.entries[h] {
-                *e = e.checked_sub(1).expect("no entry left");
-            }
+        if !self.free[h]
+            && let Some(e) = &mut self.entries[h]
+        {
+            *e = e.checked_sub(1).expect("no entry left");
         }
-        self.barred = false;
     }
 
     /// Seat `at` plays `rank` (0 = discards or shows out)
@@ -212,8 +208,7 @@ fn evaluate(a: &Analysis, c: &Constraints) -> u64 {
             trick: [0; 4],
             played: 0,
             won: 0,
-            free: [c.first == Some(Seat::North), c.first == Some(Seat::South)],
-            barred: c.first.is_some(),
+            free: [Seat::North, Seat::South].map(|h| c.first.is_none_or(|f| f == h)),
             entries: c.entries,
         };
         let weight = weight(missing, west, c);

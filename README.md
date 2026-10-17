@@ -28,7 +28,7 @@ Assumptions, as in Pavlicek's card-combination tables: unlimited entries to
 both hands, no ruffs, no inference about the enemy hands, only tricks in this
 suit count.  Up to 8 missing cards.  For trick targets, `Constraints` set
 other vacant places, cards known to be with East or West, length and HCP
-ranges, the hand that leads first and finite entries.
+ranges, the hand the lead starts in and finite entries.
 
 ## Library
 
@@ -51,9 +51,10 @@ plays one and lets the engine's defenders answer.  The `serde` feature derives
 `Solver::with_constraints` takes `Constraints`: the defenders' vacant places
 (13 less the cards known in their other suits), the cards of this suit
 known to be with each, and ranges of each one's length and high-card points
-in this suit (not the whole hand), the hand that must lead first, and
+in this suit (not the whole hand), the hand the lead starts in, and
 entries to North and South in other suits.  A hand leads free after winning
-the last round of the suit, or as the first leader; otherwise the lead takes
+the last round of the suit, or for the first round from the hand the lead
+starts in (either, if none is named); otherwise the lead takes
 one of its entries, as in SuitPlay (the defenders, after winning a round,
 switch suits).  Only trick targets take them
 (`Error::Unsupported` otherwise), and scores are then out of

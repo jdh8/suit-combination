@@ -242,23 +242,23 @@
     "checked": "2026-10-18", "note": "Baseline for the entry cases below"
   },
   {
-    "north": "AQJT", "south": "32", "goal": 4, "entries": [null, 1], "score": 503880, "leads": ["2"], "avoid": ["A"],
-    "source": "Hand derivation: one lead from South (South never wins a trick, so every lead from it spends an entry): finesse, then the A drops West's Kx; wins West's K, Kx: C(19, 12) + 6 C(19, 11). The A first drops only a singleton K: C(19, 12) + C(19, 7) = 100776",
+    "north": "AQJT", "south": "32", "goal": 4, "first": "N", "entries": [null, 1], "score": 503880, "leads": ["2"], "avoid": ["A"],
+    "source": "Hand derivation: the lead starts in North and South never wins a trick, so South leads once: finesse, then the A drops West's Kx; wins West's K, Kx: C(19, 12) + 6 C(19, 11). The A first drops only a singleton K: C(19, 12) + C(19, 7) = 100776",
     "checked": "2026-10-18", "note": "SuitPlay's entry rule, with the limited hand in South"
   },
   {
-    "north": "AQJT", "south": "32", "goal": 4, "entries": [null, 0], "score": 100776, "leads": ["A"],
+    "north": "AQJT", "south": "32", "goal": 4, "first": "N", "entries": [null, 0], "score": 100776, "leads": ["A"],
     "source": "Hand derivation: no lead from South; the A drops a singleton K on either side: C(19, 12) + C(19, 7)",
     "checked": "2026-10-18"
   },
   {
-    "north": "AQJT", "south": "32", "goal": 4, "first": "N", "entries": [null, 1], "score": 100776, "leads": ["A"],
-    "source": "Hand derivation: North must lead first; the A drops a singleton K (C(19, 12) + C(19, 7)), after which one finesse cannot pick up West's Kx, and a lower honour led loses to the K",
-    "checked": "2026-10-18", "note": "The forced first lead costs the finesse that the free entry case gets"
+    "north": "AQJT", "south": "32", "goal": 4, "entries": [null, 0], "score": 503880, "leads": ["2"],
+    "source": "Hand derivation: with no hand named the lead may start in either, so South leads the first round free and no other: the finesse, then the A, wins West's K, Kx: C(19, 12) + 6 C(19, 11)",
+    "checked": "2026-10-18", "note": "SuitC's reading of no hand on lead (its probe: either hand's first lead is free)"
   },
   {
     "north": "AQJT", "south": "32", "goal": 4, "first": "S", "entries": [null, 0], "score": 503880, "leads": ["2"],
-    "source": "Hand derivation: South's forced first lead is free and its only one: the finesse, then the A, wins West's K, Kx: C(19, 12) + 6 C(19, 11)",
+    "source": "Hand derivation: the lead starts in South, which leads once: the finesse, then the A, wins West's K, Kx: C(19, 12) + 6 C(19, 11)",
     "checked": "2026-10-18"
   },
   {
@@ -270,5 +270,45 @@
     "north": "AKQ2", "south": "J", "goal": 4, "first": "N", "entries": [1, 0], "score": 10400600, "leads": ["2"], "avoid": ["A"],
     "source": "Hand derivation: the 2 to the J, then North's one outside entry for the A, K, Q",
     "checked": "2026-10-18", "note": "Unblocking with one entry"
+  },
+  {
+    "north": "AQJT", "south": "65432", "goal": 5, "vacant": [11, 8], "first": "S", "entries": [null, 2], "value": 0.4030, "tolerance": 0.00005, "total": 75582, "leads": ["6"], "avoid": ["A"],
+    "source": "Bridge CCAnalyser guide (Guide to Bridge CCAnalyser.pdf?v=1.13) section 3.5, p. 11: West 8, East 11 vacant places, lead in South, 2 side entries to South",
+    "checked": "2026-10-18", "note": "Published as 40.30 percent: K987 with West needs a third entry to cash the fifth trick (S:6 40.30, N:A 12.49)"
+  },
+  {
+    "north": "AQJT", "south": "65432", "goal": 5, "vacant": [11, 8], "hcp": [[0, 0], [0, 10]], "first": "S", "entries": [null, 2], "value": 0.9571, "tolerance": 0.00005, "total": 31824, "leads": ["6"],
+    "source": "Bridge CCAnalyser guide section 3.6, p. 13: the previous case with East holding at most 0 HCP",
+    "checked": "2026-10-18", "note": "Published as 95.71 percent; the K is with West, so the total is C(18, 7)"
+  },
+  {
+    "north": "AQJT", "south": "65432", "goal": 5, "first": "S", "entries": [null, 1], "score": 2762942,
+    "source": "Hand derivation: North holds four cards, so South leads the fifth round, always by an entry; the free first lead and one entry pick up West's K or Kx: C(22, 12) + 3 C(22, 11)",
+    "checked": "2026-10-18"
+  },
+  {
+    "north": "AQJT", "south": "65432", "goal": 5, "first": "S", "entries": [null, 2], "score": 4702880,
+    "source": "Hand derivation: two entries also pick up West's Kxx: C(22, 12) + 3 C(22, 11) + 3 C(22, 10)",
+    "checked": "2026-10-18"
+  },
+  {
+    "north": "AQJT", "south": "65432", "goal": 5, "first": "S", "entries": [null, 3], "score": 5200300,
+    "source": "Hand derivation: three entries pick up every K with West: C(25, 12)",
+    "checked": "2026-10-18"
+  },
+  {
+    "north": "AQJ", "south": "432", "goal": 3, "first": "S", "entries": [null, 0], "score": 503880,
+    "source": "Hand derivation: one finesse from South, then the A drops West's Kx and the J is good: C(19, 12) + 6 C(19, 11)",
+    "checked": "2026-10-18"
+  },
+  {
+    "north": "AQ", "south": "432", "goal": 2, "first": "N", "entries": [null, 0], "score": 37128,
+    "source": "Hand derivation: South never leads, so only the A dropping a singleton K wins: 2 C(18, 12)",
+    "checked": "2026-10-18"
+  },
+  {
+    "north": "AKQ2", "south": "543", "goal": 4, "first": "S", "entries": [0, null], "score": 3695120,
+    "source": "Hand derivation: North wins every round it leads, so needs no entry; the 2 is the fourth trick on a 3-3 split: 20 C(20, 10)",
+    "checked": "2026-10-18", "note": "Winning a round keeps the lead in that hand"
   }
 ]
