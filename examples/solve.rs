@@ -1,12 +1,15 @@
-//! `cargo run --release --example solve -- AJ52 K76 [TARGET|ev|exact] [--budget SECS]`
+//! `cargo run --release --example solve -- AJ52 K76 [TARGET|ev|exact] [--budget SECS]
+//! [--vacant EAST,WEST] [--east CARDS] [--west CARDS]`
 //!
 //! Prints the value of every goal (or just the one given) with its status,
 //! and the line for the goal shown last.  `--budget` gives each goal at most
-//! that many seconds; a goal out of time shows only its bound.
+//! that many seconds; a goal out of time shows only its bound.  `--vacant`
+//! sets the defenders' vacant places, `--east` and `--west` the cards known
+//! to be with them; only trick targets take these.
 
 use contract_bridge::Holding;
 use std::time::{Duration, Instant};
-use suit_combination::{Error, Goal, Solver, TOTAL};
+use suit_combination::{Constraints, Error, Goal, Solver};
 
 fn fail(message: impl std::fmt::Display) -> ! {
     eprintln!("{message}");
@@ -24,19 +27,44 @@ fn holding(seat: &str, s: &str) -> Holding {
     })
 }
 
+const USAGE: &str = "usage: solve NORTH SOUTH [TARGET|ev|exact] [--budget SECS] \
+    [--vacant EAST,WEST] [--east CARDS] [--west CARDS]";
+
+/// Removes `--flag VALUE` from `args`, returning the value
+fn flag(args: &mut Vec<String>, name: &str) -> Option<String> {
+    let i = args.iter().position(|a| a == name)?;
+    if i + 1 >= args.len() {
+        fail(format!("{name}: value expected"));
+    }
+    Some(args.drain(i..i + 2).nth(1).unwrap())
+}
+
 fn main() {
     let mut args: Vec<String> = std::env::args().skip(1).collect();
-    let budget = args.iter().position(|a| a == "--budget").map(|i| {
-        let secs = args.get(i + 1).and_then(|s| s.parse::<f64>().ok());
-        let secs = secs.unwrap_or_else(|| fail("--budget: seconds expected"));
-        args.drain(i..i + 2);
-        Duration::from_secs_f64(secs)
+    let budget = flag(&mut args, "--budget").map(|s| {
+        let secs = s.parse::<f64>().ok();
+        Duration::from_secs_f64(secs.unwrap_or_else(|| fail("--budget: seconds expected")))
     });
+    let mut constraints = Constraints::default();
+    if let Some(v) = flag(&mut args, "--vacant") {
+        let places: Vec<_> = v.split(',').filter_map(|p| p.parse::<u8>().ok()).collect();
+        let [east, west] = places[..] else {
+            fail("--vacant: EAST,WEST expected, e.g. 9,6");
+        };
+        constraints.vacant = [east, west];
+    }
+    for (i, name) in ["--east", "--west"].into_iter().enumerate() {
+        if let Some(cards) = flag(&mut args, name) {
+            constraints.known[i] = holding(&name[2..], &cards);
+        }
+    }
     let [north, south, rest @ ..] = args.as_slice() else {
-        fail("usage: solve NORTH SOUTH [TARGET|ev|exact] [--budget SECS]");
+        fail(USAGE);
     };
     let (north, south) = (holding("north", north), holding("south", south));
-    let mut solver = Solver::new(north, south).unwrap_or_else(|e| fail(e));
+    let mut solver =
+        Solver::with_constraints(north, south, constraints).unwrap_or_else(|e| fail(e));
+    let total = solver.total();
     let max = north.len().max(south.len()) as u8;
     let goals = match rest {
         [t] if t == "ev" => vec![Goal::Expected],
@@ -46,9 +74,9 @@ fn main() {
         }],
         [] => (1..=max)
             .map(|target| Goal::Tricks { target })
-            .chain([Goal::Expected])
+            .chain((constraints == Constraints::default()).then_some(Goal::Expected))
             .collect(),
-        _ => fail("usage: solve NORTH SOUTH [TARGET|ev|exact] [--budget SECS]"),
+        _ => fail(USAGE),
     };
     let start = Instant::now();
     let results: Vec<_> = goals
@@ -59,15 +87,15 @@ fn main() {
                 solver.set_interrupt(move |_| Instant::now() >= deadline);
             }
             match solver.analyze(goal) {
-                Err(e @ Error::BadTarget) => fail(e),
+                Err(e @ (Error::BadTarget | Error::Unsupported)) => fail(e),
                 r => (goal, r),
             }
         })
         .collect();
     let elapsed = start.elapsed();
     let value = |goal: Goal, score: u64| match goal {
-        Goal::Tricks { .. } => format!("{:.2}%", score as f64 / TOTAL as f64 * 100.0),
-        _ => format!("{:.3} tricks", score as f64 / TOTAL as f64),
+        Goal::Tricks { .. } => format!("{:.2}%", score as f64 / total as f64 * 100.0),
+        _ => format!("{:.3} tricks", score as f64 / total as f64),
     };
     let name = |goal: Goal| match goal {
         Goal::Tricks { target } => format!("{target} tricks"),
@@ -83,7 +111,7 @@ fn main() {
                 value(*goal, a.score),
                 value(*goal, a.bound)
             ),
-            Err(Error::Interrupted { bound }) => {
+            Err(Error::Interrupted { bound, .. }) => {
                 println!(
                     "{}: interrupted (best <= {})",
                     name(*goal),
@@ -98,7 +126,7 @@ fn main() {
         .iter()
         .rev()
         .filter_map(|(_, r)| r.as_ref().ok())
-        .find(|a| !matches!(a.goal, Goal::Tricks { .. }) || (a.score < TOTAL && a.score > 0))
+        .find(|a| !matches!(a.goal, Goal::Tricks { .. }) || (a.score < total && a.score > 0))
     {
         println!("\nLine for {}: {}", name(a.goal), value(a.goal, a.score));
         for l in &a.leads {

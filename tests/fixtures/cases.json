@@ -195,5 +195,30 @@
     "source": "This project, tests/solver.rs expected_brackets_the_exact_search; exact search, not independent",
     "checked": "2026-10-16",
     "note": "Falsecard case: the combined target line gets 1.644, the exact search 1.651"
+  },
+  {
+    "north": "AQ2", "south": "543", "goal": 2, "score": 5250688,
+    "source": "Hand derivation: A, then the finesse; West holds the K in C(25, 12) deals, East a singleton K in C(19, 7)",
+    "checked": "2026-10-18", "note": "Baseline for the constrained cases below"
+  },
+  {
+    "north": "AQ2", "south": "543", "goal": 2, "vacant": [13, 7], "score": 27145, "total": 77520,
+    "source": "Hand derivation: East 13, West 7 vacant places, so 13 unknown cards of other suits; West holds the K in C(19, 6) deals, East a singleton K in C(13, 1), out of C(20, 7)",
+    "checked": "2026-10-18"
+  },
+  {
+    "north": "AQ2", "south": "543", "goal": 2, "west": "K", "score": 5200300, "total": 5200300,
+    "source": "Hand derivation: the K known with West, so the finesse always wins; C(25, 12) deals",
+    "checked": "2026-10-18"
+  },
+  {
+    "north": "AQ2", "south": "543", "goal": 2, "east": "K", "score": 503880, "total": 5200300,
+    "source": "Hand derivation: the K known with East; duck a round, then the A drops a singleton or doubleton K: C(19, 7) + 6 C(19, 8) of C(25, 13) deals",
+    "checked": "2026-10-18"
+  },
+  {
+    "north": "AKT98", "south": "5432", "goal": 5, "east": "Q", "score": 2116296, "total": 5200300,
+    "source": "Hand derivation: the Q known with East; A then K drops West's J from Jx and East's J from QJ, every 2-2 split: 3 C(22, 11) of C(25, 13) deals; the finesse (West J76, J7, J6) gets C(22, 10) + 2 C(22, 11) = 2057510",
+    "checked": "2026-10-18", "note": "A known card splits the QJ class: East's Q tells nothing, so no restricted choice, and the drop wins"
   }
 ]

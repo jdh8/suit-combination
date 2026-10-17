@@ -97,7 +97,7 @@ fn check_bound(
             assert_eq!(&a, best, "{what}");
             false
         }
-        Err(Error::Interrupted { bound }) => {
+        Err(Error::Interrupted { bound, .. }) => {
             assert!(
                 bound >= best.bound,
                 "{what}: bound {bound} < {}",
@@ -247,7 +247,7 @@ fn short_budgets_still_finish() {
                 calls += 1;
                 match solver.analyze(goal) {
                     Ok(a) => break a,
-                    Err(Error::Interrupted { bound }) => assert!(bound >= best.bound),
+                    Err(Error::Interrupted { bound, .. }) => assert!(bound >= best.bound),
                     Err(e) => panic!("{e}"),
                 }
                 assert!(calls < 100_000, "{n} {s} {goal:?} makes no progress");
@@ -264,7 +264,7 @@ fn double_dummy(north: Holding, south: Holding, goal: Goal) -> Option<u64> {
     solver.set_poll_interval(1);
     solver.set_interrupt(|_| true);
     match solver.analyze(goal) {
-        Err(Error::Interrupted { bound }) => Some(bound),
+        Err(Error::Interrupted { bound, .. }) => Some(bound),
         Ok(_) => None,
         Err(e) => panic!("{e}"),
     }

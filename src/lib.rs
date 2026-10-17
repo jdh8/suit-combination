@@ -6,7 +6,9 @@
 //! taking at least some number of tricks in the suit, or the most tricks on
 //! average.  Layouts are weighted by vacant places: one giving West `w` of
 //! the `n` missing cards has weight `C(26 - n, 13 - w)` out of
-//! <code>[TOTAL] = C(26, 13)</code>.
+//! <code>[TOTAL] = C(26, 13)</code>.  [`Constraints`] set other vacant
+//! places and cards known to be with East or West; scores are then out of
+//! [`Analysis::total`].
 //!
 //! The search is exact.  Instead of a greedy per-branch value — which is *not*
 //! optimal here, because a falsecarding defender spreads one layout's weight
@@ -35,16 +37,19 @@
 //! worse.  So a layout only records how many of each such class West holds,
 //! and classes merge as the declarer cards separating them are played.
 //!
+//! A card known to be with one defender is a class of its own: declarer can
+//! tell it from its neighbours.
+//!
 //! Assumptions (the usual ones, as in Pavlicek's card-combination tables):
 //! unlimited entries to both hands, no ruffs, no inference about the enemy
-//! hands, and only tricks won in this suit count.
+//! hands beyond [`Constraints`], and only tricks won in this suit count.
 
 use contract_bridge::{Holding, Rank, Seat};
 use std::collections::HashMap;
 use std::fmt;
 use std::rc::Rc;
 
-/// `C(26, 13)`: the denominator of every probability in this crate
+/// `C(26, 13)`: the denominator of every probability without [`Constraints`]
 pub const TOTAL: u64 = 10_400_600;
 
 /// Most missing cards supported (layout sets are 256-bit)
@@ -59,14 +64,22 @@ pub enum Error {
     TooManyMissing,
     /// Target exceeds the longer hand (or is zero)
     BadTarget,
-    /// West was dealt a card North or South holds
+    /// West was dealt a card North or South holds, or a hand the
+    /// [`Constraints`] rule out
     BadWest,
     /// The card is not one declarer may play now
     NotPlayable,
     /// [`Solver::set_interrupt`] stopped the search.  No line is known, but
-    /// no line scores more than `bound` (out of [`TOTAL`], as
+    /// no line scores more than `bound` (out of `total`, as
     /// [`Analysis::score`])
-    Interrupted { bound: u64 },
+    Interrupted { bound: u64, total: u64 },
+    /// Known cards that are not missing or are with both defenders, or more
+    /// than 13 vacant places
+    BadConstraints,
+    /// No layout fits the [`Constraints`]
+    NoLayout,
+    /// The goal does not take [`Constraints`] yet: only trick targets do
+    Unsupported,
 }
 
 impl fmt::Display for Error {
@@ -77,8 +90,13 @@ impl fmt::Display for Error {
             Self::BadTarget => "target must be 1..=longer hand",
             Self::BadWest => "West holds a card of North or South",
             Self::NotPlayable => "that card cannot be played now",
-            Self::Interrupted { bound } => {
-                let bound = *bound as f64 / TOTAL as f64;
+            Self::BadConstraints => {
+                "known cards must be missing and with one defender; at most 13 vacant places"
+            }
+            Self::NoLayout => "no layout fits the constraints",
+            Self::Unsupported => "only trick targets take constraints",
+            Self::Interrupted { bound, total } => {
+                let bound = *bound as f64 / *total as f64;
                 return write!(f, "search interrupted; the best is at most {bound:.4}");
             }
         })
@@ -150,9 +168,9 @@ pub struct Analysis {
     pub north: Holding,
     pub south: Holding,
     pub goal: Goal,
-    /// For [`Goal::Tricks`], the weight (out of [`TOTAL`]) of the layouts the
+    /// For [`Goal::Tricks`], the weight (out of `total`) of the layouts the
     /// optimal line beats; otherwise the line's expected tricks times
-    /// [`TOTAL`]
+    /// `total`
     pub score: u64,
     /// At least the best `score` of any line: equal to it except for
     /// [`Goal::Expected`], where it is the sum of every target's score
@@ -162,13 +180,34 @@ pub struct Analysis {
     pub proven: bool,
     pub leads: Vec<Lead>,
     pub plan: Plan,
+    /// Weight of every layout: [`TOTAL`] without [`Constraints`]
+    pub total: u64,
 }
 
 impl Analysis {
     /// Success probability ([`Goal::Tricks`]) or expected tricks
     #[must_use]
     pub fn value(&self) -> f64 {
-        self.score as f64 / TOTAL as f64
+        self.score as f64 / self.total as f64
+    }
+}
+
+/// What declarer knows of the defenders' hands besides the cards they play
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Constraints {
+    /// Vacant places of East, West: 13 less the cards known in their other
+    /// suits.  The default 13/13 means nothing is known.
+    pub vacant: [u8; 2],
+    /// Cards of the suit known to be with East, West
+    pub known: [Holding; 2],
+}
+
+impl Default for Constraints {
+    fn default() -> Self {
+        Self {
+            vacant: [13; 2],
+            known: [Holding::EMPTY; 2],
+        }
     }
 }
 
@@ -516,38 +555,70 @@ struct Structure {
 }
 
 fn binom(n: u64, k: u64) -> u64 {
+    if k > n {
+        return 0;
+    }
     (0..k).fold(1, |acc, i| acc * (n - i) / (i + 1))
 }
 
+/// Ways to fill the `vacant` places (East, West) left by the `n` missing
+/// cards, West holding `w` of them, with the defenders' unknown cards of
+/// other suits: `C(26 - n, 13 - w)` at 13/13
+fn vacancy(vacant: [u8; 2], n: u64, w: u64) -> u64 {
+    let [east, west] = vacant.map(u64::from);
+    match (west.checked_sub(w), east.checked_sub(n - w)) {
+        (Some(rest), Some(other)) => binom(rest + other, rest),
+        _ => 0,
+    }
+}
+
 impl Structure {
-    fn new(missing: u16, live: u16) -> Self {
-        let n = missing.count_ones() as usize;
+    fn new(missing: u16, live: u16, c: &Constraints) -> Self {
+        let n = missing.count_ones() as u64;
+        let [east, west] = c.known.map(Holding::to_bits);
         let mut classes: Vec<Class> = Vec::new();
         let mut len = 1;
+        let mut push = |ranks: u16| {
+            let size = ranks.count_ones() as u8;
+            classes.push(Class {
+                ranks,
+                size,
+                stride: len,
+            });
+            len *= usize::from(size) + 1;
+        };
         let mut cur = 0u16;
         for r in 2..16u8 {
-            if r < 15 && missing >> r & 1 != 0 {
-                cur |= 1 << r;
-            } else if cur != 0 && (r == 15 || live >> r & 1 != 0) {
-                let size = cur.count_ones() as u8;
-                classes.push(Class {
-                    ranks: cur,
-                    size,
-                    stride: len,
-                });
-                len *= usize::from(size) + 1;
+            let bit = 1 << r;
+            if r < 15 && (east | west) & bit != 0 {
+                if cur != 0 {
+                    push(cur);
+                    cur = 0;
+                }
+                push(bit);
+            } else if r < 15 && missing & bit != 0 {
+                cur |= bit;
+            } else if cur != 0 && (r == 15 || live & bit != 0) {
+                push(cur);
                 cur = 0;
             }
         }
         let count = |i: usize, c: &Class| i / c.stride % (usize::from(c.size) + 1);
-        let weight = (0..len)
+        // A known card's class holds it on its side: West count 1 or 0
+        let fits = |i: usize, c: &Class| {
+            (west & c.ranks == 0 || count(i, c) == 1) && (east & c.ranks == 0 || count(i, c) == 0)
+        };
+        let weight: Vec<u64> = (0..len)
             .map(|i| {
-                let west: usize = classes.iter().map(|c| count(i, c)).sum();
+                if !classes.iter().all(|c| fits(i, c)) {
+                    return 0;
+                }
+                let w: usize = classes.iter().map(|c| count(i, c)).sum();
                 classes
                     .iter()
                     .map(|c| binom(c.size.into(), count(i, c) as u64))
                     .product::<u64>()
-                    * binom(26 - n as u64, 13 - west as u64)
+                    * vacancy(c.vacant, n, w as u64)
             })
             .collect();
         let ge = std::array::from_fn(|d| {
@@ -575,7 +646,7 @@ impl Structure {
                 .collect()
         });
         let mut all = Set::EMPTY;
-        for i in 0..len {
+        for i in (0..len).filter(|&i| weight[i] > 0) {
             all.insert(i);
         }
         Self {
@@ -732,6 +803,7 @@ pub struct Solver {
     north: Holding,
     south: Holding,
     missing: u16,
+    constraints: Constraints,
     /// Layout spaces by live declarer cards
     structures: FxMap<u16, Rc<Structure>>,
     /// Antichains of tricks per layout, for [`Goal::ExactExpected`], with
@@ -778,6 +850,16 @@ enum Step {
 
 impl Solver {
     pub fn new(north: Holding, south: Holding) -> Result<Self, Error> {
+        Self::with_constraints(north, south, Constraints::default())
+    }
+
+    /// A solver for `north` opposite `south` under `constraints`, which only
+    /// trick targets take ([`Error::Unsupported`] otherwise)
+    pub fn with_constraints(
+        north: Holding,
+        south: Holding,
+        constraints: Constraints,
+    ) -> Result<Self, Error> {
         if !(north & south).is_empty() {
             return Err(Error::Overlap);
         }
@@ -785,10 +867,18 @@ impl Solver {
         if missing.count_ones() as usize > MAX_MISSING {
             return Err(Error::TooManyMissing);
         }
-        Ok(Self {
+        let [east, west] = constraints.known.map(Holding::to_bits);
+        if (east | west) & !missing != 0
+            || east & west != 0
+            || constraints.vacant.iter().any(|&v| v > 13)
+        {
+            return Err(Error::BadConstraints);
+        }
+        let mut solver = Self {
             north,
             south,
             missing,
+            constraints,
             structures: FxMap::default(),
             memo: FxMap::default(),
             memo_t: FxMap::default(),
@@ -802,7 +892,18 @@ impl Solver {
             armed: false,
             interrupted: false,
             dd: None,
-        })
+        };
+        if solver.total() == 0 {
+            return Err(Error::NoLayout);
+        }
+        Ok(solver)
+    }
+
+    /// Weight of every layout, the denominator of every score:
+    /// [`TOTAL`] without [`Constraints`]
+    pub fn total(&mut self) -> u64 {
+        let s = self.structure(self.root().live());
+        s.weight.iter().sum()
     }
 
     /// Let `f` stop [`analyze`](Self::analyze) early.  It is called every
@@ -862,7 +963,7 @@ impl Solver {
         Rc::clone(
             self.structures
                 .entry(live)
-                .or_insert_with(|| Rc::new(Structure::new(self.missing, live))),
+                .or_insert_with(|| Rc::new(Structure::new(self.missing, live, &self.constraints))),
         )
     }
 
@@ -887,6 +988,8 @@ impl Solver {
             Goal::Tricks { target } if target == 0 || target > self.max_tricks() => {
                 Err(Error::BadTarget)
             }
+            Goal::Tricks { .. } => Ok(()),
+            _ if self.constraints != Constraints::default() => Err(Error::Unsupported),
             _ => Ok(()),
         }
     }
@@ -996,11 +1099,13 @@ impl Solver {
     }
 
     /// [`Analysis`] for every target from one trick up to the longer hand's
-    /// length, then for [`Goal::Expected`]; the first goal interrupted ends it
+    /// length, then for [`Goal::Expected`] unless there are [`Constraints`];
+    /// the first goal interrupted ends it
     pub fn analyze_all(&mut self) -> Result<Vec<Analysis>, Error> {
+        let ev = self.constraints == Constraints::default();
         (1..=self.max_tricks())
             .map(|target| Goal::Tricks { target })
-            .chain([Goal::Expected])
+            .chain(ev.then_some(Goal::Expected))
             .map(|goal| self.analyze(goal))
             .collect()
     }
@@ -1016,6 +1121,7 @@ impl Solver {
         if std::mem::take(&mut self.interrupted) {
             return Err(Error::Interrupted {
                 bound: self.ceiling(goal),
+                total: self.total(),
             });
         }
         a
@@ -1084,6 +1190,7 @@ impl Solver {
             proven: score == bound,
             leads,
             plan,
+            total: structure.weight.iter().sum(),
         })
     }
 
@@ -1487,7 +1594,7 @@ impl Solver {
                 west += held;
                 deals *= binom(u64::from(class.size) - sw - se, held - sw);
             }
-            w[i] = deals * binom(26 - n, 13 - west);
+            w[i] = deals * vacancy(self.constraints.vacant, n, west);
         }
         w
     }
@@ -1631,6 +1738,15 @@ impl Game {
             return Err(Error::BadWest);
         }
         let st = solver.root();
+        let s = solver.structure(st.live());
+        let layout: usize = s
+            .classes
+            .iter()
+            .map(|c| c.stride * (west & c.ranks).count_ones() as usize)
+            .sum();
+        if s.weight[layout] == 0 {
+            return Err(Error::BadWest);
+        }
         let reqs = match goal {
             Goal::Expected => {
                 let s = solver.structure(st.live());

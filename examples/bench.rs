@@ -111,7 +111,7 @@ fn one(north: Holding, south: Holding, goal: &str, budget: Option<Duration>) {
             a.bound,
             if a.proven { "proven" } else { "bounded" },
         ),
-        Err(Error::Interrupted { bound }) => (0, bound, "interrupted"),
+        Err(Error::Interrupted { bound, .. }) => (0, bound, "interrupted"),
         Err(e) => panic!("{e}"),
     };
     let ms = start.elapsed().as_secs_f64() * 1e3;

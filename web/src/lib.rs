@@ -75,7 +75,7 @@ impl Trainer {
             .set_interrupt(move |_| memory() > MEMORY_CAP || deadline.is_some_and(|d| now() >= d));
         match self.solver.analyze(goal) {
             Ok(a) => serde_json::to_value(&a).map_err(err),
-            Err(Error::Interrupted { bound }) => Ok(serde_json::json!({
+            Err(Error::Interrupted { bound, .. }) => Ok(serde_json::json!({
                 "goal": goal,
                 "interrupted": true,
                 "bound": bound,

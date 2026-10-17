@@ -25,7 +25,7 @@ use std::collections::HashMap;
 use std::rc::Rc;
 use std::sync::Mutex;
 use std::sync::atomic::{AtomicUsize, Ordering};
-use suit_combination::{Error, Goal, Solver, TOTAL};
+use suit_combination::{Constraints, Error, Goal, Solver, TOTAL};
 
 /// Seats by index, as the trick goes round
 const NORTH: usize = 0;
@@ -72,6 +72,15 @@ impl Rules {
             weight: Box::new(move |west| vacant_places(missing, west)),
         }
     }
+
+    /// [`standard`](Self::standard) with layouts weighted under `c`
+    fn constrained(north: Holding, south: Holding, c: Constraints) -> Self {
+        let missing = DECK & !north.to_bits() & !south.to_bits();
+        Self {
+            weight: Box::new(move |west| constrained(missing, west, c)),
+            ..Self::standard(north, south)
+        }
+    }
 }
 
 fn binom(n: u64, k: u64) -> u64 {
@@ -83,6 +92,24 @@ fn binom(n: u64, k: u64) -> u64 {
 fn vacant_places(missing: u16, west: u16) -> u64 {
     let n = u64::from(missing.count_ones());
     binom(26 - n, 13 - u64::from(west.count_ones()))
+}
+
+/// Deals in which West holds exactly `west` of the `missing` cards, under
+/// `c`: 0 unless each defender holds the cards known to be theirs, else the
+/// ways to fill West's other vacant places from the defenders' unknown
+/// cards of other suits
+fn constrained(missing: u16, west: u16, c: Constraints) -> u64 {
+    let [east_known, west_known] = c.known.map(Holding::to_bits);
+    let (n, w) = (missing.count_ones(), west.count_ones());
+    let [east_places, west_places] = c.vacant.map(u32::from);
+    if west & west_known != west_known || west & east_known != 0 {
+        return 0;
+    }
+    if w > west_places || n - w > east_places {
+        return 0;
+    }
+    let unknown = east_places + west_places - n;
+    binom(unknown.into(), (west_places - w).into())
 }
 
 /// Everything declarer knows, which is all a strategy may depend on.  The
@@ -473,15 +500,21 @@ fn name(north: Holding, south: Holding) -> String {
 /// exactly, overall and per opening card; the fast expected-tricks line must
 /// not beat the exact value (overall or per lead) and its bound must be the
 /// sum of the targets.
-fn compare(north: Holding, south: Holding, o: &Solved) -> (Vec<String>, usize) {
+fn compare(north: Holding, south: Holding, c: Constraints, o: &Solved) -> (Vec<String>, usize) {
     let mut fails = Vec::new();
     let mut checks = 0;
-    let name = name(north, south);
-    let mut solver = Solver::new(north, south).unwrap();
+    let name = format!("{} {c:?}", name(north, south));
+    let mut solver = Solver::with_constraints(north, south, c).unwrap();
     let longer = north.len().max(south.len()) as u8;
+    // Only trick targets take constraints
+    let ev = if c == Constraints::default() {
+        &[(Goal::ExactExpected, None), (Goal::Expected, None)][..]
+    } else {
+        &[]
+    };
     let goals = (1..=longer)
         .map(|target| (Goal::Tricks { target }, Some(target)))
-        .chain([(Goal::ExactExpected, None), (Goal::Expected, None)]);
+        .chain(ev.iter().copied());
     for (goal, target) in goals {
         let a = solver.analyze(goal).unwrap();
         let want = o.best(target);
@@ -569,7 +602,11 @@ fn random_combos(count: usize, min: u32, max: u32, seed: u64) -> Vec<(Holding, H
 /// Compare every combination, spread over the machine's threads, skipping
 /// those the oracle gives up on at `limit` vectors; panics with every
 /// disagreement
-fn check_all(combos: &[(Holding, Holding)], limit: usize) {
+fn check_all(
+    combos: &[(Holding, Holding)],
+    limit: usize,
+    constrain: impl Fn(Holding, Holding) -> Constraints + Sync,
+) {
     let short = |&(n, s): &(Holding, Holding)| n.len().min(s.len());
     assert!(combos.iter().any(|c| short(c) == 0), "no void hand");
     assert!(combos.iter().any(|c| short(c) == 1), "no singleton");
@@ -582,13 +619,23 @@ fn check_all(combos: &[(Holding, Holding)], limit: usize) {
             scope.spawn(|| {
                 while let Some(&(n, s)) = combos.get(next.fetch_add(1, Ordering::Relaxed)) {
                     let t = std::time::Instant::now();
-                    let mut oracle = Oracle::new(n, s, Rules::standard(n, s));
+                    let c = constrain(n, s);
+                    let mut oracle = Oracle::new(n, s, Rules::constrained(n, s, c));
                     oracle.limit = limit;
+                    if oracle.layouts.is_empty() {
+                        // No layout fits: the engine must say so
+                        let mut r = results.lock().unwrap();
+                        r.1 += 1;
+                        if Solver::with_constraints(n, s, c).err() != Some(Error::NoLayout) {
+                            r.0.push(format!("{} {c:?}: engine accepts no layout", name(n, s)));
+                        }
+                        continue;
+                    }
                     let Some(o) = Solved::within(oracle) else {
                         results.lock().unwrap().3.push(name(n, s));
                         continue;
                     };
-                    let (fails, checks) = compare(n, s, &o);
+                    let (fails, checks) = compare(n, s, c, &o);
                     if t.elapsed().as_secs() >= 5 {
                         eprintln!("slow: {} {:?}", name(n, s), t.elapsed());
                     }
@@ -615,7 +662,46 @@ fn check_all(combos: &[(Holding, Holding)], limit: usize) {
 #[test]
 #[cfg_attr(debug_assertions, ignore = "slow unoptimized: run with --release")]
 fn oracle_agrees_on_random_small_combinations() {
-    check_all(&random_combos(120, 3, 6, 0x2545_F491_4F6C_DD1D), usize::MAX);
+    check_all(
+        &random_combos(120, 3, 6, 0x2545_F491_4F6C_DD1D),
+        usize::MAX,
+        |_, _| Constraints::default(),
+    );
+}
+
+/// Random vacant places from 4 to 13 and, for each missing card, one chance
+/// in three that it is known to be with East or West, seeded by the
+/// combination; sometimes no layout fits
+fn random_constraints(north: Holding, south: Holding) -> Constraints {
+    let mut x = u64::from(north.to_bits()) << 16 | u64::from(south.to_bits()) | 1 << 40;
+    let mut rand = move || {
+        x ^= x << 13;
+        x ^= x >> 7;
+        x ^= x << 17;
+        x
+    };
+    let mut known = [0u16; 2];
+    for r in cards(DECK & !north.to_bits() & !south.to_bits()) {
+        match rand() % 6 {
+            0 => known[0] |= 1 << r,
+            1 => known[1] |= 1 << r,
+            _ => {}
+        }
+    }
+    Constraints {
+        vacant: [4 + (rand() % 10) as u8, 4 + (rand() % 10) as u8],
+        known: known.map(Holding::from_bits_truncate),
+    }
+}
+
+#[test]
+#[cfg_attr(debug_assertions, ignore = "slow unoptimized: run with --release")]
+fn oracle_agrees_under_constraints() {
+    check_all(
+        &random_combos(200, 3, 7, 0xD1B5_4A32_D192_ED03),
+        usize::MAX,
+        random_constraints,
+    );
 }
 
 #[test]
@@ -624,7 +710,11 @@ fn oracle_agrees_on_more_combinations() {
     // ponytail: the oracle skips combinations whose antichains pass LIMIT
     // vectors (about 5%, some hours each); the engine goes unchecked there.
     const LIMIT: usize = 50_000;
-    check_all(&random_combos(1000, 2, 8, 0x9E37_79B9_7F4A_7C15), LIMIT);
+    check_all(
+        &random_combos(1000, 2, 8, 0x9E37_79B9_7F4A_7C15),
+        LIMIT,
+        |_, _| Constraints::default(),
+    );
 }
 
 /// The reference cases with at most eight missing cards (today's engine
@@ -639,6 +729,9 @@ fn oracle_agrees_on_reference_cases() {
         south: String,
         /// A trick target, or "expected"
         goal: serde_json::Value,
+        vacant: Option<[u8; 2]>,
+        east: Option<String>,
+        west: Option<String>,
         score: Option<u64>,
         value: Option<f64>,
         tolerance: Option<f64>,
@@ -646,19 +739,29 @@ fn oracle_agrees_on_reference_cases() {
         avoid: Option<Vec<String>>,
     }
     let cases: Vec<Case> = serde_json::from_str(include_str!("fixtures/cases.json")).unwrap();
-    let mut solved: Vec<((Holding, Holding), Solved)> = Vec::new();
+    let mut solved: Vec<((Holding, Holding, Constraints), Solved)> = Vec::new();
     let mut fails = Vec::new();
     for c in cases {
-        let combo = (holding(&c.north), holding(&c.south));
+        let known = |h: &Option<String>| h.as_deref().map_or(Holding::EMPTY, holding);
+        let constraints = Constraints {
+            vacant: c.vacant.unwrap_or([13; 2]),
+            known: [known(&c.east), known(&c.west)],
+        };
+        let combo = (holding(&c.north), holding(&c.south), constraints);
         if 13 - combo.0.len() - combo.1.len() > 8 {
             continue;
         }
         if !solved.iter().any(|(k, _)| *k == combo) {
-            let o = Solved::new(combo.0, combo.1);
-            fails.extend(compare(combo.0, combo.1, &o).0);
+            let o = Solved::with(
+                combo.0,
+                combo.1,
+                Rules::constrained(combo.0, combo.1, combo.2),
+            );
+            fails.extend(compare(combo.0, combo.1, combo.2, &o).0);
             solved.push((combo, o));
         }
         let o = &solved.iter().find(|(k, _)| *k == combo).unwrap().1;
+        let total: u64 = o.oracle.weights.iter().sum();
         let target = c.goal.as_u64().map(|t| u8::try_from(t).unwrap());
         assert!(target.is_some() || c.goal == "expected", "{}", c.goal);
         let name = format!("{} {target:?}", name(combo.0, combo.1));
@@ -668,7 +771,7 @@ fn oracle_agrees_on_reference_cases() {
         }
         if let Some(value) = c.value {
             let tolerance = c.tolerance.unwrap_or(0.00005);
-            let v = best as f64 / TOTAL as f64;
+            let v = best as f64 / total as f64;
             if (v - value).abs() > tolerance {
                 fails.push(format!("{name}: oracle {v:.5}, fixture {value}"));
             }
@@ -721,7 +824,7 @@ fn interrupted_bound_is_double_dummy() {
             solver.set_poll_interval(1);
             solver.set_interrupt(|_| true);
             match solver.analyze(goal) {
-                Err(Error::Interrupted { bound }) => {
+                Err(Error::Interrupted { bound, .. }) => {
                     assert_eq!(bound, want, "{} {goal:?}", name(north, south));
                 }
                 // Nothing to search: no line beats double dummy either

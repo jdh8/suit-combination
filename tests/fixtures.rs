@@ -4,7 +4,7 @@
 
 use contract_bridge::{Holding, Rank, Seat};
 use serde::Deserialize;
-use suit_combination::{Analysis, Goal, Plan, Solver, TOTAL, analyze};
+use suit_combination::{Analysis, Constraints, Goal, Plan, Solver, TOTAL};
 
 #[derive(Deserialize)]
 #[serde(untagged)]
@@ -19,7 +19,14 @@ struct Case {
     north: String,
     south: String,
     goal: CaseGoal,
+    /// Vacant places of East, West (default 13, 13)
+    vacant: Option<[u8; 2]>,
+    /// Cards known to be with East, West
+    east: Option<String>,
+    west: Option<String>,
     score: Option<u64>,
+    /// The constrained denominator; [`TOTAL`] if absent
+    total: Option<u64>,
     value: Option<f64>,
     tolerance: Option<f64>,
     leads: Option<Vec<String>>,
@@ -34,6 +41,16 @@ struct Case {
 
 fn cases() -> Vec<Case> {
     serde_json::from_str(include_str!("fixtures/cases.json")).unwrap()
+}
+
+impl Case {
+    fn constraints(&self) -> Constraints {
+        let known = |h: &Option<String>| h.as_deref().map_or(Holding::EMPTY, holding);
+        Constraints {
+            vacant: self.vacant.unwrap_or([13; 2]),
+            known: [known(&self.east), known(&self.west)],
+        }
+    }
 }
 
 fn binom(n: u64, k: u64) -> u64 {
@@ -119,11 +136,28 @@ fn follow(plan: &Plan, mut p: Pos) -> u8 {
     }
 }
 
+/// Deals in which West holds exactly `west` of the `missing` cards under
+/// `c`: none unless the known cards are where `c` puts them, else the ways
+/// West's other vacant places take the defenders' unknown cards of other
+/// suits
+fn weight(missing: u16, west: u16, c: &Constraints) -> u64 {
+    let [east_known, west_known] = c.known.map(Holding::to_bits);
+    if west & west_known != west_known || west & east_known != 0 {
+        return 0;
+    }
+    let n = u64::from(missing.count_ones());
+    let w = u64::from(west.count_ones());
+    let [east, west] = c.vacant.map(u64::from);
+    if w > west || n - w > east {
+        return 0;
+    }
+    binom(east + west - n, west - w)
+}
+
 /// The plan's score recomputed over every layout: deals reaching the target,
 /// or tricks times deals
-fn evaluate(a: &Analysis) -> u64 {
+fn evaluate(a: &Analysis, c: &Constraints) -> u64 {
     let missing = (Holding::ALL - a.north - a.south).to_bits();
-    let n = u64::from(missing.count_ones());
     let mut west = 0u16;
     let mut total = 0;
     loop {
@@ -134,8 +168,8 @@ fn evaluate(a: &Analysis) -> u64 {
             played: 0,
             won: 0,
         };
-        let tricks = follow(&a.plan, p);
-        let weight = binom(26 - n, 13 - u64::from(west.count_ones()));
+        let weight = weight(missing, west, c);
+        let tricks = if weight == 0 { 0 } else { follow(&a.plan, p) };
         total += weight
             * match a.goal {
                 Goal::Tricks { target } => u64::from(tricks >= target),
@@ -173,9 +207,15 @@ fn reference_cases() {
                 Goal::ExactExpected
             }
         };
-        let a = analyze(n, s, goal).unwrap();
-        let name = format!("{n} / {s} {goal:?}");
+        let constraints = c.constraints();
+        let mut solver = Solver::with_constraints(n, s, constraints).unwrap();
+        let a = solver.analyze(goal).unwrap();
+        let name = format!("{n} / {s} {goal:?} {constraints:?}");
         let mut fail = |what: String| failures.push(format!("{name}: {what}"));
+        let total = c.total.unwrap_or(TOTAL);
+        if a.total != total {
+            fail(format!("total {} != {total}", a.total));
+        }
         if let Some(score) = c.score
             && a.score != score
         {
@@ -198,7 +238,7 @@ fn reference_cases() {
             }
         }
         if goal == Goal::ExactExpected {
-            let line = analyze(n, s, Goal::Expected).unwrap();
+            let line = solver.analyze(Goal::Expected).unwrap();
             if !(line.score <= a.score && a.score <= line.bound) {
                 fail(format!(
                     "fast line {} / bound {} do not bracket {}",
@@ -212,19 +252,22 @@ fn reference_cases() {
 
 /// Every goal's plan, replayed against every defence, scores what the
 /// analysis claims
-fn check_plans(north: Holding, south: Holding) {
-    let mut solver = Solver::new(north, south).unwrap();
+fn check_plans(north: Holding, south: Holding, c: Constraints) {
+    let mut solver = Solver::with_constraints(north, south, c).unwrap();
     let mut analyses = solver.analyze_all().unwrap();
-    analyses.push(solver.analyze(Goal::ExactExpected).unwrap());
+    if c == Constraints::default() {
+        analyses.push(solver.analyze(Goal::ExactExpected).unwrap());
+    }
     for a in &analyses {
-        assert_eq!(evaluate(a), a.score, "{north} / {south} {:?}", a.goal);
+        let name = format!("{north} / {south} {:?} {c:?}", a.goal);
+        assert_eq!(evaluate(a, &c), a.score, "{name}");
     }
 }
 
 #[test]
 fn reference_plans_hold_against_every_defence() {
     for c in cases() {
-        check_plans(holding(&c.north), holding(&c.south));
+        check_plans(holding(&c.north), holding(&c.south), c.constraints());
     }
 }
 
@@ -253,7 +296,7 @@ fn random_plans_hold_against_every_defence() {
         if n.len() < s.len() || s.is_empty() {
             continue;
         }
-        check_plans(n, s);
+        check_plans(n, s, Constraints::default());
         done += 1;
     }
 }

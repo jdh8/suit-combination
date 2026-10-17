@@ -1,7 +1,9 @@
 //! Suit-combination analysis and play through the public API.
 
 use contract_bridge::{Holding, Seat};
-use suit_combination::{Analysis, Error, Game, Goal, Plan, Solver, TOTAL, analyze, analyze_all};
+use suit_combination::{
+    Analysis, Constraints, Error, Game, Goal, Plan, Solver, TOTAL, analyze, analyze_all,
+};
 
 fn binom(n: u64, k: u64) -> u64 {
     (0..k).fold(1, |acc, i| acc * (n - i) / (i + 1))
@@ -274,4 +276,48 @@ fn restricted_choice_in_the_game() {
     // QJ doubleton or West's Jx
     assert_eq!(by(Seat::South, "543"), one);
     assert_eq!(by(Seat::North, "K"), 5 * binom(22, 11));
+}
+
+#[test]
+fn constraint_errors() {
+    let h = |s: &str| s.parse::<Holding>().unwrap();
+    let solver = |vacant, east: &str, west: &str| {
+        let c = Constraints {
+            vacant,
+            known: [h(east), h(west)],
+        };
+        Solver::with_constraints(h("AQ2"), h("543"), c)
+    };
+    let error = |r: Result<Solver, Error>| r.err();
+    assert_eq!(
+        error(solver([13, 13], "A", "")),
+        Some(Error::BadConstraints)
+    );
+    assert_eq!(
+        error(solver([13, 13], "K", "K")),
+        Some(Error::BadConstraints)
+    );
+    assert_eq!(error(solver([14, 13], "", "")), Some(Error::BadConstraints));
+    // Seven missing cards in six places, or two known cards in one place
+    assert_eq!(error(solver([3, 3], "", "")), Some(Error::NoLayout));
+    assert_eq!(error(solver([13, 1], "", "KJ")), Some(Error::NoLayout));
+
+    let mut s = solver([13, 7], "", "K").unwrap();
+    assert_eq!(s.analyze(Goal::Expected).unwrap_err(), Error::Unsupported);
+    assert_eq!(
+        s.analyze(Goal::ExactExpected).unwrap_err(),
+        Error::Unsupported
+    );
+    // Every target, and no expected tricks
+    assert_eq!(s.analyze_all().unwrap().len(), 3);
+    let t = Goal::Tricks { target: 2 };
+    assert_eq!(Game::new(&mut s, h("J"), t).unwrap_err(), Error::BadWest);
+    // More cards than West's places
+    let mut five = solver([13, 5], "", "").unwrap();
+    assert_eq!(
+        Game::new(&mut five, h("KJT987"), t).unwrap_err(),
+        Error::BadWest
+    );
+    let game = Game::new(&mut s, h("KJ"), t).unwrap();
+    assert_eq!(game.weight(&mut s), s.total());
 }

@@ -197,6 +197,19 @@ in [tests/solver.rs](../tests/solver.rs) pins the hand-derived counts. A
 known card breaks its class's symmetry and must become a class of its own;
 derive the fixture's weights by hand first.
 
+**Status 2026-10-18:** vacant places and known East/West cards are in
+(`Constraints`, `Solver::with_constraints`, `Analysis::total`, CLI
+`--vacant`/`--east`/`--west`). A known card is a class of its own; layouts
+it rules out drop from the layout set. Checked by five hand-derived
+fixtures (two of the first derivations were wrong, and the engine and the
+oracle both found the missed lines: a duck against a known Kx, and the drop
+when a known Q makes East's Q tell nothing), the policy evaluator under the
+same constraints, and the oracle with its own weights on 200 random
+constrained combinations. Defaults are byte-identical to before on 3,000
+combinations and 400 in exact mode. Expected tricks return
+`Error::Unsupported` when constrained. Not yet: length and HCP
+restrictions, the wasm and UI surfaces (phase 5).
+
 **Done:** each option matches independent target examples; defaults
 reproduce phase 1; `AQ / 2` solves; unsupported option combinations,
 including a new option with an expected-tricks goal, are rejected clearly.
@@ -251,8 +264,7 @@ for the measured scope.
 
 ## Next step and exclusions
 
-Phase 3, item 1 (vacant places and known cards) for trick targets. This
-plan changes documentation only.
+Phase 3, item 1 continued: length and HCP restrictions for trick targets.
 
 Not needed: rewrite, server backend, new framework, GPU search, full-deal AI,
 bidding inference. Mixed-strategy equilibria are a separate research question.

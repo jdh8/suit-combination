@@ -26,7 +26,8 @@ which is exact but can take seconds.
 
 Assumptions, as in Pavlicek's card-combination tables: unlimited entries to
 both hands, no ruffs, no inference about the enemy hands, only tricks in this
-suit count.  Up to 8 missing cards.
+suit count.  Up to 8 missing cards.  For trick targets, `Constraints` set
+other vacant places and cards known to be with East or West.
 
 ## Library
 
@@ -46,6 +47,12 @@ trick by trick: `moves` scores each card declarer may play now, and `play`
 plays one and lets the engine's defenders answer.  The `serde` feature derives
 `Serialize` for the result types.
 
+`Solver::with_constraints` takes `Constraints`: the defenders' vacant places
+(13 less the cards known in their other suits) and the cards of this suit
+known to be with each.  Only trick targets take them (`Error::Unsupported`
+otherwise), and scores are then out of `Analysis::total`, not `TOTAL`.  The
+CLI takes `--vacant EAST,WEST`, `--east CARDS` and `--west CARDS`.
+
 Every `Analysis` says whether it is `proven`: its `score` equals its `bound`,
 so no line does better.  Only a `Goal::Expected` line can fall short; the
 best then lies in `score..=bound`, and each `Lead` carries its own `bound`
@@ -55,7 +62,7 @@ leads).
 A search can be given a budget.  `Solver::set_interrupt` takes a callback
 that is polled every 1024 or so states searched, with the number of states
 memoized; once it returns `true`, `analyze` fails with
-`Error::Interrupted { bound }`.  No line is known then, but none scores more
+`Error::Interrupted { bound, total }`.  No line is known then, but none scores more
 than `bound`: each target's score where its search finished, else what
 declarer would make seeing all four hands (double dummy), summed over targets
 for expected tricks.  The memo keeps only finished work, so asking again on
