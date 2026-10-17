@@ -164,3 +164,39 @@ details.custom .controls { margin-top: 0.6rem; }
 .log li::before { font-weight: 700; }
 .log .ok::before { content: "✓ "; color: var(--club); }
 .log .no::before { content: "✗ "; color: var(--heart); }
+
+/* Analyse page: page links, tabs, goal chips, tables of lines and layouts,
+   and the play explorer. */
+header nav { margin-left: auto; font-size: 0.9rem; }
+header nav a { color: inherit; }
+a.secondary { display: inline-block; text-decoration: none; font-size: 0.9rem; padding: 0.3rem 0.8rem; border: 1px solid rgba(0, 0, 0, 0.3); border-radius: 6px; color: inherit; }
+.controls.form { gap: 0.5rem 0.9rem; }
+.tabs { display: flex; flex-wrap: wrap; gap: 0.4rem; align-items: center; }
+.tabs .grow { flex: 1; }
+.tabs [data-tab] { font: inherit; padding: 0.35rem 0.9rem; border: 0; border-radius: 6px 6px 0 0; background: rgba(0, 0, 0, 0.18); color: inherit; cursor: pointer; }
+.tabs [data-tab].active { background: var(--paper); color: var(--ink); font-weight: 600; }
+.panel .controls input, .panel .controls select { border-color: rgba(0, 0, 0, 0.3); }
+.chips { display: flex; flex-wrap: wrap; gap: 0.3rem; }
+.chip, .mini { font: inherit; font-size: 0.85rem; padding: 0.15rem 0.6rem; border: 1px solid rgba(0, 0, 0, 0.25); border-radius: 999px; background: transparent; color: inherit; cursor: pointer; }
+.chip.active, .mini.active { background: var(--gold); border-color: var(--gold); font-weight: 600; }
+.summary { margin: 0.2rem 0; font-weight: 600; }
+details.tree summary, details.layouts summary { cursor: pointer; font-size: 0.9rem; opacity: 0.75; margin-top: 0.5rem; }
+.scroll { overflow-x: auto; }
+table.grid { border-collapse: collapse; font-size: 0.85rem; margin-top: 0.3rem; }
+table.grid th, table.grid td { padding: 0.15rem 0.5rem; border-bottom: 1px solid rgba(0, 0, 0, 0.08); text-align: left; white-space: nowrap; }
+table.grid .num { text-align: right; font-variant-numeric: tabular-nums; }
+table.grid tr.diff td { background: rgba(245, 197, 24, 0.25); }
+table.lines tr[data-line] { cursor: pointer; }
+table.lines tr[data-line]:hover td { background: rgba(0, 0, 0, 0.05); }
+table.lines tr.chosen td { background: rgba(245, 197, 24, 0.35); font-weight: 600; }
+.note, .flag { font-size: 0.9rem; margin: 0.3rem 0; }
+.flag { color: var(--heart); }
+.hands { margin: 0.2rem 0; font-weight: 600; }
+ol.tricks { margin: 0.2rem 0; padding-left: 1.5rem; }
+ol.tricks .words { display: block; font-size: 0.85rem; opacity: 0.7; }
+.next { display: flex; flex-wrap: wrap; gap: 0.5rem; align-items: center; margin: 0.4rem 0; }
+.next .made { color: var(--club); font-weight: 600; }
+.next .hopeless { opacity: 0.6; }
+.card.small { width: 2rem; height: 2.4rem; font-size: 1rem; }
+button.secondary.dark { border-color: rgba(0, 0, 0, 0.3); }
+button.secondary.dark:hover { background: rgba(0, 0, 0, 0.06); }

@@ -1,0 +1,58 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Suit analysis</title>
+  <link rel="stylesheet" href="style.css">
+</head>
+<body>
+  <header>
+    <h1>Suit combinations</h1>
+    <nav><a href="index.html">Practice</a> · <b>Analyse</b></nav>
+  </header>
+  <main>
+    <div class="controls">
+      <label>North <input id="north" placeholder="AQ1098" size="9" autocapitalize="characters"></label>
+      <label>South <input id="south" placeholder="5432" size="9" autocapitalize="characters"></label>
+      <button id="go" class="primary">Analyse</button>
+      <span class="boardinfo" id="info"></span>
+      <button id="cancel" class="secondary hidden">Cancel</button>
+      <button id="more" class="secondary hidden">Keep searching</button>
+    </div>
+
+    <details class="custom" id="constraints">
+      <summary>Constraints</summary>
+      <div class="controls form">
+        <label>Vacant places E <input id="vacant-e" size="3" placeholder="13"> W <input id="vacant-w" size="3" placeholder="13"></label>
+        <label>Known with E <input id="known-e" size="6" placeholder="cards"> W <input id="known-w" size="6" placeholder="cards"></label>
+        <label>Length E <input id="length-e" size="5" placeholder="2-4"> W <input id="length-w" size="5" placeholder="any"></label>
+        <label>HCP E <input id="hcp-e" size="5" placeholder="-3"> W <input id="hcp-w" size="5" placeholder="any"></label>
+        <label>Lead starts in <select id="first"><option value="">either hand</option><option>North</option><option>South</option></select></label>
+        <label>Entries N <input id="entries-n" size="3" placeholder="∞"> S <input id="entries-s" size="3" placeholder="∞"></label>
+        <label>Rounds <input id="rounds" size="3" placeholder="all"></label>
+        <label>First card <input id="lead" size="3" placeholder="any"></label>
+        <label>Discards <input id="discards" size="6" placeholder="cards"></label>
+        <label>Ruffs N <input id="ruffs-n" size="2" placeholder="0"> E <input id="ruffs-e" size="2" placeholder="0"> S <input id="ruffs-s" size="2" placeholder="0"> W <input id="ruffs-w" size="2" placeholder="0"></label>
+      </div>
+    </details>
+
+    <div class="tabs hidden" id="tabs">
+      <button data-tab="targets">Trick targets</button>
+      <button data-tab="ev">Expected tricks &amp; lines</button>
+      <span class="grow"></span>
+      <button id="share" class="secondary">Copy link</button>
+      <button id="json" class="secondary">JSON</button>
+    </div>
+    <section class="panel hidden" id="out"></section>
+
+    <p class="hint">Declarer sees only the cards played; the defenders see all
+      four hands.  Odds are vacant-places weights under the constraints.
+      Every value is exact; a goal out of time shows as interrupted, with a
+      bound no line beats.  Lines
+      never tell interchangeable defenders' cards apart, so a comparison can
+      miss a line that does.</p>
+  </main>
+  <script type="module" src="analyse.js"></script>
+</body>
+</html>

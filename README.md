@@ -148,8 +148,23 @@ choose is graded against the best play from the same information; the
 defenders hold a random layout (vacant-places odds) and answer with the card
 that hurts most on it, breaking ties by the most deceptive one.  At the end it
 shows every lead's value and the line.  The line need not play every card
-the trainer grades best: it keeps what the optimum needs over every layout,
-while a falsecarding defender may make a different card best from here.
+that is best afresh from here: it keeps what the optimum needs over every
+layout, while a falsecarding defender makes the layouts still possible
+unequally likely to reach here.  So the trainer grades the line's own card
+right too.
+
+`analyse.html` analyses one combination without playing it: cards and
+every `Constraints` field, all trick targets and expected tricks at once,
+every first card, each line in words, as a tree, and as an explorer where
+you pick any defender reply, and what it guarantees on every layout.
+Expected tricks has a tab of its own with every line on the Pareto front
+compared at matchpoints or IMPs (`Solver::compare`): trick distribution,
+gains against a chosen line, the best line or the cycle, and two lines
+side by side layout by layout.  The problem lives in the URL hash as JSON,
+so "Copy link" shares it; "JSON" downloads it with every result.  The bridge
+words (`web/render.js`, checked by `node web/render.test.mjs`) come from
+the verified tree and name only what the cards show: a lead, a cash, a
+finesse, a duck, letting a card run.
 
 Every goal shows its value as it arrives, or interrupted with the bound no
 line beats.  The worker answers in slices of 300 ms

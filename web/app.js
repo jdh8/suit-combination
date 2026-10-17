@@ -4,12 +4,14 @@
 // interesting goal, deals the defenders' cards, and plays the suit out,
 // grading each card declarer chooses.
 
+import { RANKS, cardText, cardsText, rankText, value, planItems, fmt, normalize } from './render.js';
+
 const TOTAL = 10400600; // C(26, 13), the denominator of every root score
-const RANKS = '23456789TJQKA'; // index + 2 = rank value used in the JSON
 const SUITS = [['♠', 's-s'], ['♥', 's-h'], ['♦', 's-d'], ['♣', 's-c']];
 const id = (x) => document.getElementById(x);
 
-// { search, north, south, suit, analysis, snap, plays, log, lead, done, busy }
+// { search, north, south, suit, analysis, snap, plays, log, lead, done, busy,
+//   node: where the analysis's plan stands after the plays, null off it }
 let problem = null;
 // The combination being solved (see newSearch)
 let search = null;
@@ -243,7 +245,6 @@ function shuffle(a) {
   return a;
 }
 
-const fmt = (ranks) => ranks.sort((a, b) => b - a).map((r) => RANKS[r - 2]).join('');
 
 function randomHoldings(total) {
   const ranks = shuffle([...RANKS].map((_, i) => i + 2)).slice(0, total);
@@ -314,13 +315,6 @@ async function solveRandom(s) {
   return s.keys.map((k) => s.results.get(k));
 }
 
-// Accepts "aj52", "A J 10 2", "AJT2"; returns ranks in descending order.
-function normalize(text) {
-  const seen = new Set();
-  for (const tok of text.toUpperCase().replace(/10/g, 'T').match(/[2-9TJQKA]/g) || []) seen.add(tok);
-  return fmt([...seen].map((c) => RANKS.indexOf(c) + 2));
-}
-
 async function customProblem() {
   const north = normalize(id('c-north').value);
   const south = normalize(id('c-south').value);
@@ -352,7 +346,7 @@ async function setProblem(s, analysis) {
   const snap = JSON.parse(await call('start', [west, target]));
   if (search !== s) return;
   const suit = SUITS[Math.floor(Math.random() * SUITS.length)];
-  problem = { search: s, north, south, suit, analysis, snap, plays: [...snap.plays], log: [], lead: null, done: false, busy: false };
+  problem = { search: s, north, south, suit, analysis, snap, plays: [...snap.plays], log: [], lead: null, done: false, busy: false, node: follow(analysis.plan, snap.plays) };
   s.visible = true;
   info('');
   render();
@@ -373,14 +367,6 @@ function goalText(goal) {
     : 'How do you play for the most tricks on average?';
 }
 
-// `score` out of `weight`: a probability or an expected number of tricks
-function value(goal, score, weight) {
-  return goal.kind === 'tricks' ? `${(score / weight * 100).toFixed(1)}%` : `${(score / weight).toFixed(2)} tricks`;
-}
-
-const cardText = (c) => (c === 'T' ? '10' : c);
-const cardsText = (cards) => [...cards].map(cardText).join('/');
-const rankText = (r) => (r === null ? '–' : cardText(RANKS[r - 2]));
 
 function handRow(seat, inner) {
   const row = document.createElement('div');
@@ -468,6 +454,18 @@ function render() {
 
 // --- play -------------------------------------------------------------------
 
+// The plan after `plays`, or null once they leave it; a made or hopeless
+// branch has nothing more to say
+function follow(node, plays) {
+  for (const p of plays) {
+    if (!node || node.kind === 'made' || node.kind === 'hopeless') return node;
+    if (node.kind === 'declarer') node = (p.card === null ? !node.cards : node.cards.includes(RANKS[p.card - 2])) ? node.then : null;
+    else if (node.kind === 'defender') node = node.branches.find(([labels]) => labels.includes(p.card))?.[1] ?? null;
+    else node = null;
+  }
+  return node;
+}
+
 async function play(rank) {
   if (problem.busy) return;
   problem.busy = true;
@@ -475,7 +473,11 @@ async function play(rank) {
   const goal = analysis.goal;
   const chosen = snap.moves.find((m) => m.cards.includes(rank));
   const best = Math.max(...snap.moves.map((m) => m.score));
-  const ok = chosen.score === best;
+  // The plan keeps what the whole line needs, which a fresh look from here
+  // (the score) can rate lower: the defenders' falsecards make the layouts
+  // still possible unequally likely to reach here.  Its card is right.
+  const planned = problem.node?.kind === 'declarer' && problem.node.cards.includes(rank);
+  const ok = chosen.score === best || planned;
   problem.lead ??= chosen;
   const alternatives = snap.moves
     .filter((m) => m.score === best)
@@ -484,7 +486,7 @@ async function play(rank) {
   log.push({
     ok,
     text: `Trick ${Math.floor(plays.length / 4) + 1}, ${chosen.seat} ${cardText(rank)}: ${value(goal, chosen.score, snap.weight)}`
-      + (ok ? '' : `; best ${value(goal, best, snap.weight)} with ${alternatives}`),
+      + (chosen.score === best ? '' : `; ${planned ? 'the optimal line\'s card; afresh from here, ' : ''}best ${value(goal, best, snap.weight)} with ${alternatives}`),
   });
   // Every state was memoized by the analysis, so this is quick.
   let next;
@@ -497,6 +499,7 @@ async function play(rank) {
     problem.busy = false;
   }
   plays.push(...next.plays);
+  problem.node = follow(problem.node, next.plays);
   problem.snap = next;
   render();
   if (next.over) finish();
@@ -535,34 +538,10 @@ function finish() {
     <div class="panel-title">Every lead</div>
     <table class="leads">${rows}</table>
     <div class="panel-title">Optimal line</div>
-    <div class="plan"><ul>${planItems(analysis.plan, goal)}</ul></div>
-    <p style="margin:0.8rem 0 0"><button class="primary" id="next">Next problem</button></p>`;
+    <div class="plan"><ul>${planItems(analysis.plan, goal, problem.north, problem.south)}</ul></div>
+    <p style="margin:0.8rem 0 0"><button class="primary" id="next">Next problem</button>
+      <a class="secondary" href="analyse.html#${encodeURIComponent(JSON.stringify({ n: problem.north, s: problem.south, goal: goalKey(goal) }))}">Analyse</a></p>`;
   id('next').onclick = newProblem;
-}
-
-// Flattens declarer's forced sequence into sibling items; a defender's choice
-// opens one nested list per distinct continuation.
-function planItems(plan, goal) {
-  switch (plan.kind) {
-    case 'made':
-      return `<li class="made">${goal.kind === 'tricks' ? '✓ made' : '✓ every trick played for is in'}</li>`;
-    case 'hopeless':
-      return `<li class="hopeless">${goal.kind === 'tricks' ? 'cannot be made from here — play on for what it is worth' : 'no more tricks to be had'}</li>`;
-    case 'declarer': {
-      const what = plan.cards ? `play the ${cardsText(plan.cards)}` : 'discard';
-      return `<li>${plan.seat}: ${what}</li>` + planItems(plan.then, goal);
-    }
-    case 'defender':
-      if (plan.branches.length === 1) return planItems(plan.branches[0][1], goal);
-      return plan.branches
-        .map(([labels, sub]) => {
-          const cards = labels.map((l) => (l === null ? 'nothing' : rankText(l))).join('/');
-          return `<li><span class="branch">${plan.seat} plays ${cards}:</span><ul>${planItems(sub, goal)}</ul></li>`;
-        })
-        .join('');
-    default:
-      return '';
-  }
 }
 
 main();

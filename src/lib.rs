@@ -186,8 +186,24 @@ pub struct Analysis {
     pub score: u64,
     pub leads: Vec<Lead>,
     pub plan: Plan,
+    /// Tricks the line guarantees on each of [`Solver::layouts`]: for
+    /// [`Goal::Tricks`], the target where it makes and 0 elsewhere
+    pub guarantee: Vec<u8>,
     /// Weight of every layout: [`TOTAL`] without [`Constraints`]
     pub total: u64,
+}
+
+/// One layout of the missing cards, as [`Analysis::guarantee`] and
+/// [`Line::guarantee`] index them
+#[derive(Debug, Clone, PartialEq, Eq)]
+#[cfg_attr(feature = "serde", derive(serde::Serialize))]
+pub struct Layout {
+    /// West holds this many of each group of interchangeable cards (any
+    /// of them, as no line tells them apart), East the rest
+    pub west: Vec<(Holding, u8)>,
+    /// Weight of the deals with this layout, out of the total: 0 if the
+    /// [`Constraints`] rule it out
+    pub weight: u64,
 }
 
 impl Analysis {
@@ -200,7 +216,7 @@ impl Analysis {
 
 /// How [`Solver::compare`] scores one line against another, as SuitPlay does
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-#[cfg_attr(feature = "serde", derive(serde::Serialize))]
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 #[cfg_attr(feature = "serde", serde(tag = "kind", rename_all = "snake_case"))]
 pub enum Scoring {
     /// How often a line takes more tricks than the other, whatever the margin
@@ -253,6 +269,8 @@ pub struct Line {
     pub score: u64,
     /// `tricks[k]`: weight of the layouts on which the line takes `k` tricks
     pub tricks: Vec<u64>,
+    /// Tricks the line takes on each of [`Solver::layouts`]
+    pub guarantee: Vec<u8>,
     /// The line, its first card included
     pub plan: Plan,
 }
@@ -279,6 +297,8 @@ pub struct Comparison {
 
 /// What declarer knows of the defenders' hands besides the cards they play
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
+#[cfg_attr(feature = "serde", serde(default, deny_unknown_fields))]
 pub struct Constraints {
     /// Vacant places of East, West: 13 less the cards known in their other
     /// suits.  The default 13/13 means nothing is known.
@@ -1192,7 +1212,9 @@ impl Solver {
 
     /// Most tricks declarer can take: the longer hand's cards in play, or
     /// fewer rounds
-    fn max_tricks(&self) -> u8 {
+    /// Most tricks a goal may target: the longer hand's cards in play, at
+    /// most [`Constraints::rounds`]
+    pub fn max_tricks(&self) -> u8 {
         let st = self.root();
         let longer = st.ns[0].count_ones().max(st.ns[1].count_ones()) as u8;
         longer.min(self.constraints.rounds)
@@ -1378,6 +1400,7 @@ impl Solver {
                 req.set(i, req.get(i) * target);
             }
         }
+        let guarantee = (0..structure.len).map(|i| req.get(i)).collect();
         let then = self.plan(moves[i].0, req, goal);
         let plan = Plan::Declarer {
             seat: leads[i].seat,
@@ -1391,8 +1414,28 @@ impl Solver {
             score,
             leads,
             plan,
+            guarantee,
             total: structure.weight.iter().sum(),
         })
+    }
+
+    /// Every layout of the missing cards, in the order of
+    /// [`Analysis::guarantee`] and [`Line::guarantee`]
+    pub fn layouts(&mut self) -> Vec<Layout> {
+        let s = self.structure(self.root().live());
+        (0..s.len)
+            .map(|i| Layout {
+                west: s
+                    .classes
+                    .iter()
+                    .map(|c| {
+                        let n = i / c.stride % (usize::from(c.size) + 1);
+                        (Holding::from_bits_truncate(c.ranks), n as u8)
+                    })
+                    .collect(),
+                weight: s.weight[i],
+            })
+            .collect()
     }
 
     /// Every line on the Pareto front of tricks per layout, compared pair
@@ -1435,6 +1478,7 @@ impl Solver {
             lines.push(Line {
                 score,
                 tricks,
+                guarantee: (0..s.len).map(|i| v.get(i)).collect(),
                 plan,
             });
         }

@@ -4,7 +4,7 @@
 
 use contract_bridge::{Contract, Holding, Rank, Seat};
 use serde::Deserialize;
-use suit_combination::{Analysis, Constraints, Goal, Plan, Scoring, Solver, TOTAL};
+use suit_combination::{Analysis, Constraints, Goal, Layout, Plan, Scoring, Solver, TOTAL};
 
 #[derive(Deserialize)]
 #[serde(untagged)]
@@ -238,8 +238,9 @@ fn weight(missing: u16, west: u16, c: &Constraints) -> u64 {
 }
 
 /// The plan's score recomputed over every layout: deals reaching the target,
-/// or tricks times deals
-fn evaluate(a: &Analysis, c: &Constraints) -> u64 {
+/// or tricks times deals.  Each deal's tricks must agree with the
+/// guarantee of its layout of `layouts`.
+fn evaluate(a: &Analysis, c: &Constraints, layouts: &[Layout]) -> u64 {
     let missing = (Holding::ALL - a.north - a.south).to_bits();
     let mut west = 0u16;
     let mut total = 0;
@@ -263,6 +264,22 @@ fn evaluate(a: &Analysis, c: &Constraints) -> u64 {
         };
         let weight = weight(missing, west, c);
         let tricks = if weight == 0 { 0 } else { follow(&a.plan, p) };
+        if weight > 0 {
+            let i = layouts
+                .iter()
+                .position(|l| {
+                    l.west
+                        .iter()
+                        .all(|&(h, n)| (h.to_bits() & west).count_ones() == u32::from(n))
+                })
+                .expect("every deal has a layout");
+            let g = a.guarantee[i];
+            let what = format!("{} / {} {:?} West {west:#x}", a.north, a.south, a.goal);
+            match a.goal {
+                Goal::Tricks { target } => assert_eq!(tricks >= target, g >= target, "{what}"),
+                Goal::ExactExpected => assert_eq!(tricks, g, "{what}"),
+            }
+        }
         total += weight
             * match a.goal {
                 Goal::Tricks { target } => u64::from(tricks >= target),
@@ -345,7 +362,7 @@ fn check_plans(north: Holding, south: Holding, c: Constraints) {
     let mut solver = Solver::with_constraints(north, south, c).unwrap();
     for a in &solver.analyze_all().unwrap() {
         let name = format!("{north} / {south} {:?} {c:?}", a.goal);
-        assert_eq!(evaluate(a, &c), a.score, "{name}");
+        assert_eq!(evaluate(a, &c, &solver.layouts()), a.score, "{name}");
     }
 }
 
@@ -456,7 +473,9 @@ fn comparison_cases() {
             },
         };
         let name = format!("{n} / {s} {scoring:?}");
-        let c = Solver::new(n, s).unwrap().compare(scoring).unwrap();
+        let mut solver = Solver::new(n, s).unwrap();
+        let c = solver.compare(scoring).unwrap();
+        let layouts = solver.layouts();
         // Each line plays as its trick distribution says
         for l in &c.lines {
             let a = |goal| Analysis {
@@ -466,14 +485,15 @@ fn comparison_cases() {
                 score: l.score,
                 leads: Vec::new(),
                 plan: l.plan.clone(),
+                guarantee: l.guarantee.clone(),
                 total: c.total,
             };
             let d = Constraints::default();
-            assert_eq!(evaluate(&a(Goal::ExactExpected), &d), l.score, "{name}");
+            assert_eq!(evaluate(&a(Goal::ExactExpected), &d, &layouts), l.score, "{name}");
             for k in 1..l.tricks.len() {
                 let want: u64 = l.tricks[k..].iter().sum();
                 let target = Goal::Tricks { target: k as u8 };
-                assert_eq!(evaluate(&a(target), &d), want, "{name} {k} tricks");
+                assert_eq!(evaluate(&a(target), &d, &layouts), want, "{name} {k} tricks");
             }
         }
         assert_eq!(c.best.len() == 1, case.single, "{name}: best {:?}", c.best);

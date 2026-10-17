@@ -34,7 +34,7 @@ jobs:
     - name: Stage static site
       run: |
         mkdir web/_site
-        cp -r web/index.html web/app.js web/worker.js web/style.css web/pkg web/_site/
+        cp -r web/index.html web/app.js web/analyse.html web/analyse.js web/render.js web/worker.js web/style.css web/pkg web/_site/
     - uses: actions/upload-pages-artifact@v5
       with:
         path: web/_site

@@ -3,7 +3,7 @@
 //! as JSON, and plays the suit out trick by trick.
 
 use contract_bridge::Holding;
-use suit_combination::{Error, Game, Goal, Solver};
+use suit_combination::{Constraints, Error, Game, Goal, Scoring, Solver};
 use wasm_bindgen::prelude::{JsValue, wasm_bindgen};
 
 #[wasm_bindgen]
@@ -46,17 +46,65 @@ fn err(e: impl ToString) -> JsValue {
 
 #[wasm_bindgen]
 impl Trainer {
-    /// `north` opposite `south`, ranks in descending order, e.g. `AJ52`
+    /// `north` opposite `south`, ranks in descending order, e.g. `AJ52`,
+    /// under `constraints`, `suit_combination::Constraints` as JSON (any
+    /// field left out keeps its default)
     #[wasm_bindgen(constructor)]
-    pub fn new(north: &str, south: &str) -> Result<Trainer, JsValue> {
+    pub fn new(north: &str, south: &str, constraints: Option<String>) -> Result<Trainer, JsValue> {
         let north: Holding = north.parse().map_err(|e| err(format!("North: {e}")))?;
         let south: Holding = south.parse().map_err(|e| err(format!("South: {e}")))?;
+        let constraints: Constraints = match constraints {
+            Some(json) => {
+                serde_json::from_str(&json).map_err(|e| err(format!("constraints: {e}")))?
+            }
+            None => Constraints::default(),
+        };
+        let solver = Solver::with_constraints(north, south, constraints).map_err(err)?;
         Ok(Self {
-            solver: Solver::new(north, south).map_err(err)?,
+            max_tricks: solver.max_tricks(),
+            solver,
             game: None,
-            max_tricks: north.len().max(south.len()) as u8,
             budget: None,
         })
+    }
+
+    /// Every layout of the missing cards, `suit_combination::Layout`s as
+    /// JSON, in the order of each guarantee
+    pub fn layouts(&mut self) -> String {
+        serde_json::to_string(&self.solver.layouts()).unwrap_or_default()
+    }
+
+    /// `suit_combination::Comparison` under `scoring`
+    /// (`suit_combination::Scoring` as JSON), or, out of budget or memory,
+    /// what [`analyze`](Self::analyze) returns then for expected tricks
+    pub fn compare(&mut self, scoring: &str) -> Result<String, JsValue> {
+        let scoring: Scoring =
+            serde_json::from_str(scoring).map_err(|e| err(format!("scoring: {e}")))?;
+        self.arm();
+        match self.solver.compare(scoring) {
+            Ok(c) => serde_json::to_string(&c).map_err(err),
+            Err(e) => Ok(self.interrupted(Goal::ExactExpected, e)?.to_string()),
+        }
+    }
+
+    /// Stop the next search at the budget or the memory cap
+    fn arm(&mut self) {
+        let deadline = self.budget.map(|ms| now() + ms);
+        self.solver
+            .set_interrupt(move |_| memory() > MEMORY_CAP || deadline.is_some_and(|d| now() >= d));
+    }
+
+    /// `{goal, interrupted: true, bound, memory}` for an interrupted search
+    fn interrupted(&self, goal: Goal, e: Error) -> Result<serde_json::Value, JsValue> {
+        match e {
+            Error::Interrupted { bound, .. } => Ok(serde_json::json!({
+                "goal": goal,
+                "interrupted": true,
+                "bound": bound,
+                "memory": memory() > MEMORY_CAP,
+            })),
+            e => Err(err(e)),
+        }
     }
 
     /// Give each later analysis at most `ms` milliseconds (0: no limit).
@@ -70,18 +118,10 @@ impl Trainer {
     /// memory, `{goal, interrupted: true, bound, memory}` with an upper bound
     /// on its score; `memory` says asking again is no use
     fn analyze(&mut self, goal: Goal) -> Result<serde_json::Value, JsValue> {
-        let deadline = self.budget.map(|ms| now() + ms);
-        self.solver
-            .set_interrupt(move |_| memory() > MEMORY_CAP || deadline.is_some_and(|d| now() >= d));
+        self.arm();
         match self.solver.analyze(goal) {
             Ok(a) => serde_json::to_value(&a).map_err(err),
-            Err(Error::Interrupted { bound, .. }) => Ok(serde_json::json!({
-                "goal": goal,
-                "interrupted": true,
-                "bound": bound,
-                "memory": memory() > MEMORY_CAP,
-            })),
-            Err(e) => Err(err(e)),
+            Err(e) => self.interrupted(goal, e),
         }
     }
 
@@ -90,7 +130,7 @@ impl Trainer {
         Ok(self.analyze(Goal::Tricks { target })?.to_string())
     }
 
-    /// Every target from one trick up to the longer hand's length: a JSON
+    /// Every target from one trick up to the most there are: a JSON
     /// array of what [`target`](Self::target) returns, each within the budget
     pub fn targets(&mut self) -> Result<String, JsValue> {
         let all = (1..=self.max_tricks)

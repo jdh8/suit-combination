@@ -394,6 +394,50 @@ bridge-language summaries from verified trees and keep the tree for audit.
 compare two lines, share it, without playing a random layout first. The
 distribution evaluates the same policy as the tree.
 
+**Status 2026-10-18: done.**  `web/analyse.html` takes the cards and every
+`Constraints` field (now `Deserialize`, unknown fields refused; `Scoring`
+too), solves every target and expected tricks in 300 ms slices, then the
+comparison, each shown as it arrives or as interrupted with its bound;
+"Keep searching" goes on, Cancel past 100 ms terminates the worker.  Trick
+targets: a chip per target to switch goals, every first card, the line in
+one sentence, as a tree, as an explorer that stops at each defender
+choice and offers every card (and a ruff), and what it makes on every
+layout.  Expected tricks, in its own tab: every first card and the Pareto
+front under matchpoints or IMPs (contract, tricks needed, vulnerability),
+one row per line with EV and P(at least k) for every k, the gain against
+a chosen line, the best line or the cycle; the chosen line's trick
+distribution, words, tree, explorer, and a second line side by side
+layout by layout.  Until the comparison finishes the tab flags the lines
+as not all found.  The problem (cards, constraints, goal, tab, scoring)
+is the URL hash as JSON; "JSON" downloads it with every result.  The
+trainer links each solution to it.
+
+The engine side: `Analysis::guarantee` and `Line::guarantee`, tricks per
+layout (the target or 0 for a target), and `Solver::layouts`, the layouts
+in that order as how many of each group of interchangeable cards West
+holds, with their weight; `Solver::max_tricks` is public.  The policy
+evaluator now checks every deal's tricks against its layout's guarantee,
+for every fixture and random plan and every compared line, so the
+distributions and the per-layout tables evaluate the very tree shown (a
+mutant halving the guarantee fails it).  Reproduced in the browser:
+CCAnalyser's `AQJT / 65432` entry example (40.3%), SuitPlay's
+`AQ1098 / 5432` best MP line and `Q543 / A102` IMP line.
+
+The bridge words (`web/render.js`, `node web/render.test.mjs` in CI)
+read only the tree and the cards: a lead or a cash, then for the third
+hand a finesse, winning, a duck, or letting the lead run.  A defender
+branch merging cards of different ranks is told as its lowest card.
+
+Decided: the trainer grades the plan's own card right, as well as the
+card best afresh from here.  The plan keeps what the whole line needs; a
+fresh look counts every layout still possible as equally likely to be
+here, which falsecards make untrue, so the plan's card is the right one
+when they differ.  The plan itself is unchanged.  Open: the comparison
+of every line on the hardest holdings (`KJ9753` opposite a void) does not
+finish in the browser, where one state's merge holds the worker past any
+budget, nor natively in 72 s at 1.3 GB (stopped); its tab flags the lines
+as not all found.
+
 ### 6. The report
 
 Publish a versioned comparison report: coverage, disagreements, hardware,
@@ -402,7 +446,7 @@ for the measured scope.
 
 ## Next step and exclusions
 
-Phase 5: the trainer becomes an analysis tool.  Phase 4 is done.
+Phase 6: the report.  Phase 5 is done.
 
 Not needed: rewrite, server backend, new framework, GPU search, full-deal AI,
 bidding inference. Mixed-strategy equilibria are a separate research question.
