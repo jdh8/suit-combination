@@ -840,7 +840,7 @@ fn oracle_rules_hooks() {
 /// declarer line of a small combination on every layout, against the deals
 /// that hold the cards the defenders have shown
 #[test]
-#[ignore = "known issue, fixed in phase 4: Game::weight counts class binomials"]
+#[ignore = "known issue, fixed in phase 3: Game::weight counts class binomials"]
 fn game_weight_counts_the_deals_holding_the_cards_seen() {
     // Known issue: after a defender shows a card of a multi-card class, the
     // engine weighs a layout with West holding k of the class's m cards by

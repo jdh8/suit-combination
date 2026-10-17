@@ -91,6 +91,12 @@ larger than the earlier 600-combination study suggested (0.057).
 
 ## Phases
 
+Phases run in this order. The analysis view comes after constraints and
+MP/IMP scoring because it must expose both; building it last builds it once,
+on the final engine API. Phases 1 and 2 keep the numbers earlier commits
+cite; the rest were renumbered on 2026-10-18 to match the order (constraints
+was 4, scoring 5, the analysis view 3, the report part of 5).
+
 ### 1. Evidence
 
 - `tests/fixtures/` with one record per case: holdings, goal, constraints,
@@ -144,20 +150,19 @@ browser; no silent memory pruning. Targets (engineering, not competitor
 figures): 7–9 missing cards p95 <=1 s native, <=2 s browser; visible
 answer or status within 2 s always. Difficult-corpus gates set after phase 1.
 
-### 3. Trainer becomes an analysis tool
+**Status 2026-10-18:** done in `47b9218` (speedups, uncompressed oracle),
+`bbfc43f` (budgets, cancel, proof status on every surface) and `daeb94e`
+(branch and bound on deals lost, which ended the tail). Every change is
+byte-identical to the build before it on 3,000 random combinations and 400 in
+exact mode; the oracle agrees on the reference cases and a seeded sweep.
+Corpus, 902 runs at 30 s: 902 finish, p50 2.6 ms, p95 94 ms, max 13.6 s
+(`KJ9753 / -` exact). `KJ9753 / -` for three tricks went from over fifteen
+minutes to 0.74 s. Browser cancel takes 106–109 ms; on the worst case a
+bounded status shows by 1.96 s. Open: peak memory rose to 485 MB
+(`KJ9753 / -` ev, the `Expected` line memo); the trainer still budgets exact
+search as if it took minutes; browser p95 over the corpus is not measured.
 
-Reuse `Plan`, `Lead` and the renderer. Add an Analyse view: all goals at
-once, goal switching, a play explorer where the user picks any legal defender
-reply. Show distinct strategies with per-layout guarantees and a flag when
-enumeration is incomplete, a line comparison table, a trick distribution per
-complete strategy, and shareable URL/JSON (cards, constraints, goal). Generate
-bridge-language summaries from verified trees and keep the tree for audit.
-
-**Done:** reproduce a reference position, inspect the justifying branches,
-compare two lines, share it, without playing a random layout first. The
-distribution evaluates the same policy as the tree.
-
-### 4. Constraints and coverage
+### 3. Constraints and coverage
 
 In order, each with an independent fixture before the next:
 
@@ -178,10 +183,18 @@ constraints may break the equivalence-class argument: keep the distinctions
 inference needs and verify against uncompressed layouts. Constrained analysis
 gets its own denominator; the default 13/13 contract is unchanged.
 
+Fix first: after a defender's card from a class of several, `Game::weight`,
+`Game::moves` and the `Expected` line weigh layouts by the class binomial
+`C(m, k)`, not the posterior given the cards seen, `C(m - sW - sE, k - sW)`
+(`Q83 / T62`, West `J74`, after trick 1: 4,056,234 against 2,704,156 by brute
+force). Root scores are unaffected. `Solver::post` computes the posterior;
+the ignored oracle test `game_weight_counts_the_deals_holding_the_cards_seen`
+becomes a normal test.
+
 **Done:** each option matches independent examples; defaults reproduce
 phase 1; `AQ / 2` solves; unsupported option combinations are rejected clearly.
 
-### 5. SuitPlay scoring and the report
+### 4. SuitPlay scoring
 
 Line-versus-line MP and IMP comparison over per-layout outcomes. MP is not
 renamed EV; pairwise preference need not give one dominating line, so return
@@ -192,13 +205,29 @@ fixtures: `AQ1098 / 5432` (EV vs MP) and `AJ98 / K32` (no best MP line).
 **Done:** published MP/IMP and cyclic cases agree under matching assumptions;
 target/EV fixtures still pass.
 
-Then publish a versioned comparison report: coverage, disagreements,
-hardware, native and browser timings, memory, timeouts, proof rates. Claim a
-tie only for the measured scope.
+### 5. Trainer becomes an analysis tool
+
+Reuse `Plan`, `Lead` and the renderer. Add an Analyse view exposing the
+phase 3 constraints and phase 4 scoring: all goals at once, goal switching,
+a play explorer where the user picks any legal defender reply. Show distinct strategies with per-layout guarantees and a flag when
+enumeration is incomplete, a line comparison table, a trick distribution per
+complete strategy, and shareable URL/JSON (cards, constraints, goal). Generate
+bridge-language summaries from verified trees and keep the tree for audit.
+
+**Done:** reproduce a reference position, inspect the justifying branches,
+compare two lines, share it, without playing a random layout first. The
+distribution evaluates the same policy as the tree. Exact search, now
+seconds at worst, runs before the fast EV line rather than after it.
+
+### 6. The report
+
+Publish a versioned comparison report: coverage, disagreements, hardware,
+native and browser timings, memory, timeouts, proof rates. Claim a tie only
+for the measured scope.
 
 ## Next step and exclusions
 
-Phase 1, then the highest-impact measured runtime fix. This plan changes
+Phase 3, starting with the posterior weights. This plan changes
 documentation only.
 
 Not needed: rewrite, server backend, new framework, GPU search, full-deal AI,
