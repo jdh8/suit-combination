@@ -1,10 +1,13 @@
-//! `cargo run --release --example solve -- AJ52 K76 [TARGET|ev] [--budget SECS]
+//! `cargo run --release --example solve -- AJ52 K76 [TARGET|ev|mp|imps CONTRACT NEED]
+//! [--vulnerable] [--budget SECS]
 //! [--vacant EAST,WEST] [--east CARDS] [--west CARDS] [--length EAST,WEST]
 //! [--hcp EAST,WEST] [--first N|S] [--entries NORTH,SOUTH] [--rounds N]
 //! [--lead CARD] [--discard CARDS] [--ruffs N,E,S,W]`
 //!
 //! Prints the value of every goal (or just the one given) with its status,
-//! and the line for the goal shown last.  `--budget` gives each goal at most
+//! and the line for the goal shown last.  `mp` and `imps` compare every
+//! line, the latter in CONTRACT (e.g. `3N`, `--vulnerable` or not) made
+//! with NEED tricks in this suit.  `--budget` gives each goal at most
 //! that many seconds; a goal out of time shows only its bound.  `--vacant`
 //! sets the defenders' vacant places, `--east` and `--west` the cards known
 //! to be with them, `--length` and `--hcp` (this suit only) ranges such as
@@ -17,7 +20,7 @@
 
 use contract_bridge::{Holding, Rank, Seat};
 use std::time::{Duration, Instant};
-use suit_combination::{Constraints, Error, Goal, Solver};
+use suit_combination::{Comparison, Constraints, Error, Goal, Plan, Scoring, Solver};
 
 fn fail(message: impl std::fmt::Display) -> ! {
     eprintln!("{message}");
@@ -35,10 +38,49 @@ fn holding(seat: &str, s: &str) -> Holding {
     })
 }
 
-const USAGE: &str = "usage: solve NORTH SOUTH [TARGET|ev] [--budget SECS] \
+const USAGE: &str = "usage: solve NORTH SOUTH [TARGET|ev|mp|imps CONTRACT NEED] [--vulnerable] \
+    [--budget SECS] \
     [--vacant EAST,WEST] [--east CARDS] [--west CARDS] [--length EAST,WEST] [--hcp EAST,WEST] \
     [--first N|S] [--entries NORTH,SOUTH] [--rounds N] [--lead CARD] [--discard CARDS] \
     [--ruffs N,E,S,W]";
+
+/// Prints the lines of `c`, the best, and what it gains over each other
+fn compared(c: &Comparison) {
+    let per = |x: u64| x as f64 / c.total as f64;
+    for (i, l) in c.lines.iter().enumerate() {
+        let Plan::Declarer { seat, cards, .. } = &l.plan else {
+            unreachable!("a line starts with a lead")
+        };
+        let tricks: Vec<String> = l
+            .tricks
+            .iter()
+            .map(|&w| format!("{:.2}", per(w) * 100.0))
+            .collect();
+        println!(
+            "line {i}: lead {cards} from {seat:?}, {:.3} tricks, % by tricks {}",
+            per(l.score),
+            tricks.join(" ")
+        );
+    }
+    let [b] = c.best[..] else {
+        println!("no single best line: {:?}", c.best);
+        return;
+    };
+    println!("best: line {b}");
+    let unit = match c.scoring {
+        Scoring::Matchpoints => "% of deals",
+        Scoring::Imps { .. } => "IMPs per deal",
+    };
+    for i in (0..c.lines.len()).filter(|&i| i != b) {
+        let scale = if unit.starts_with('%') { 100.0 } else { 1.0 };
+        println!(
+            "  vs line {i}: wins {:.4}, loses {:.4} {unit}",
+            per(c.gain[b][i]) * scale,
+            per(c.gain[i][b]) * scale
+        );
+    }
+    println!("{}", c.lines[b].plan);
+}
 
 /// Removes `--flag VALUE` from `args`, returning the value
 fn flag(args: &mut Vec<String>, name: &str) -> Option<String> {
@@ -75,6 +117,10 @@ fn ranges(name: &str, value: &str, default: [u8; 2]) -> [[u8; 2]; 2] {
 
 fn main() {
     let mut args: Vec<String> = std::env::args().skip(1).collect();
+    let vulnerable = args
+        .iter()
+        .position(|a| a == "--vulnerable")
+        .map(|i| args.remove(i));
     let budget = flag(&mut args, "--budget").map(|s| {
         let secs = s.parse::<f64>().ok();
         Duration::from_secs_f64(secs.unwrap_or_else(|| fail("--budget: seconds expected")))
@@ -146,6 +192,28 @@ fn main() {
     let total = solver.total();
     let d = constraints.discards;
     let max = ((north - d).len().max((south - d).len()) as u8).min(constraints.rounds);
+    let scoring = match rest {
+        [m] if m == "mp" => Some(Scoring::Matchpoints),
+        [i, contract, need] if i == "imps" => Some(Scoring::Imps {
+            contract: contract
+                .parse()
+                .unwrap_or_else(|_| fail(format!("contract: {contract}?"))),
+            vulnerable: vulnerable.is_some(),
+            need: need
+                .parse()
+                .unwrap_or_else(|_| fail(format!("need: {need}?"))),
+        }),
+        _ => None,
+    };
+    if let Some(scoring) = scoring {
+        if let Some(budget) = budget {
+            let deadline = Instant::now() + budget;
+            solver.set_interrupt(move |_| Instant::now() >= deadline);
+        }
+        let c = solver.compare(scoring).unwrap_or_else(|e| fail(e));
+        compared(&c);
+        return;
+    }
     let goals = match rest {
         [t] if t == "ev" => vec![Goal::ExactExpected],
         [t] => vec![Goal::Tricks {

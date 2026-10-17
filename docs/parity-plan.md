@@ -33,11 +33,11 @@ targets; double-dummy averages are upper bounds, not policies.
 | Capability | Today ([lib.rs](../src/lib.rs), [tests](../tests/solver.rs), [wasm](../web/src/lib.rs), [app.js](../web/app.js), [CLI](../examples/solve.rs)) | Gap |
 | --- | --- | --- |
 | Hidden-card analysis | Pareto vectors keep one strategy across indistinguishable layouts; targets (0/1 vectors) and `ExactExpected` are exhaustive | Little independent validation |
-| Expected tricks | `ExactExpected`, the exact search, is the one EV goal (the fast target-line mode was retired in phase 4) | No MP/IMP |
+| Expected tricks | `ExactExpected`, the exact search, is the one EV goal (the fast target-line mode was retired in phase 4) | — |
 | Probabilities | Fixed 13/13 vacant places, `TOTAL = C(26,13)` hard-coded in engine and browser | No vacant places, known cards, length or HCP constraints |
 | Entries and play | Unlimited entries, no ruffs by default; the starting hand, finite entries, round limits, a fixed first card, discards and one side's ruffs (`Constraints`) | No overruffs |
 | Alternative lines | Values for every equivalent opening lead; one plan per goal | No line browser, line-by-layout matrix or comparison |
-| Goals | At-least-N, exact EV | No MP/IMP line comparison |
+| Goals | At-least-N, exact EV, MP/IMP line comparison (`Solver::compare`) | Lines treat cards not yet told apart alike |
 | Coverage | Any holding: the limit is 256 layouts after merging interchangeable cards (at most 162 for any holding); only many known cards or an HCP range exceed it (`TooManyMissing`) | Over-limit constraint combinations are rejected, not solved |
 | Interface | Browser trainer, custom holdings, card grading, revealable tree, CLI, serializable Rust API | No analysis-first view, free defender branching, sharing or export |
 | Runtime control | Worker termination; random-deal and exact-EV budgets | No engine budget, retained progress or memory contract |
@@ -352,6 +352,30 @@ evaluator on every constrained fixture; and by the oracle sweep, now with
 expected tricks under every random constraint (a mutant off by one deal
 under ruffs fails it).  Defaults byte-identical on 3,000 combinations.
 
+Item 3 done: `Solver::compare(Scoring)` takes the root's whole Pareto
+front (`Cut::ALL`), each line with its trick distribution and plan, the
+gain of every line over every other (deals at matchpoints, IMPs times
+deals, by `Contract::score` and the WBF scale), and the Smith set over
+"beats or ties" as `best`: one line is the best, more mean none is.  CLI
+`mp` and `imps CONTRACT NEED [--vulnerable]`.  SuitPlay's three examples
+agree exactly (`tests/fixtures/comparisons.json`): `AQ1098 / 5432`, the
+10 beats the most-tricks line on 2,437,358 deals and loses on 2,057,510
+(3.6522%); `Q543 / A102` in 3NT vulnerable needing two, the imp-best line
+wins 0.17764 IMPs and loses 0.16149 against the safe line (SuitPlay
+prints 0.1777 and 0.1614 from rounded percentages); `AJ98 / K32` has no
+best MP line, all 40 lines on one cycle.  The evaluator replays every
+line's plan and confirms its trick distribution.  The full oracle's front
+is not the engine's: on `32 / KT864` a line that reacts to East's 7 and
+9 differently once the 8 between them is gone takes a third trick on
+West 9QJ, where the engine's line takes two.  The engine never tells such
+cards apart, which loses nothing for a target or expected tricks (mirror
+layouts weigh the same) but drops lines from a comparison.  So the check
+is a coarse oracle, sharing no code with the engine, whose declarer sees
+each defender card only as its class as the engine does: its root front
+equals the engine's on 81 combinations (`32 / KT864` and 80 random), and
+every MP and IMP gain matches (an IMP-scale mutant fails it).  Whether
+comparisons should include lines that tell such cards apart is open.
+
 **Done:** no fast-EV code left; EV fixtures pass on the exact search;
 published MP/IMP and cyclic cases agree under matching assumptions; target
 fixtures still pass.
@@ -378,7 +402,7 @@ for the measured scope.
 
 ## Next step and exclusions
 
-Phase 4, item 3: SuitPlay's MP and IMP line comparison.
+Phase 5: the trainer becomes an analysis tool.  Phase 4 is done.
 
 Not needed: rewrite, server backend, new framework, GPU search, full-deal AI,
 bidding inference. Mixed-strategy equilibria are a separate research question.

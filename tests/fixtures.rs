@@ -2,9 +2,9 @@
 //! that replays a returned [`Plan`] on every layout, letting the defenders
 //! try every legal card, without the engine's layout compression.
 
-use contract_bridge::{Holding, Rank, Seat};
+use contract_bridge::{Contract, Holding, Rank, Seat};
 use serde::Deserialize;
-use suit_combination::{Analysis, Constraints, Goal, Plan, Solver, TOTAL};
+use suit_combination::{Analysis, Constraints, Goal, Plan, Scoring, Solver, TOTAL};
 
 #[derive(Deserialize)]
 #[serde(untagged)]
@@ -391,4 +391,107 @@ fn total_is_the_sum_of_layout_weights() {
     let n = 8;
     let sum: u64 = (0..=n).map(|w| binom(n, w) * binom(26 - n, 13 - w)).sum();
     assert_eq!(sum, TOTAL);
+}
+
+/// How a [`Comparison`](suit_combination::Comparison) case scores: `"matchpoints"`, or IMPs
+#[derive(Deserialize)]
+#[serde(untagged)]
+enum CaseScoring {
+    Matchpoints(String),
+    Imps {
+        contract: String,
+        vulnerable: bool,
+        need: u8,
+    },
+}
+
+/// The line a comparison case measures the best one against: the most
+/// expected tricks, or of the lines best for a target, the most expected
+/// tricks
+#[derive(Deserialize)]
+#[serde(untagged)]
+enum Versus {
+    Target(u8),
+    Expected(String),
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct Comparison {
+    north: String,
+    south: String,
+    scoring: CaseScoring,
+    versus: Option<Versus>,
+    /// What the best line wins over the `versus` line, and loses to it
+    gain: Option<[u64; 2]>,
+    /// One best line
+    single: bool,
+    #[allow(dead_code)]
+    source: String,
+    #[allow(dead_code)]
+    checked: String,
+    #[allow(dead_code)]
+    note: Option<String>,
+}
+
+#[test]
+fn comparison_cases() {
+    let cases: Vec<Comparison> =
+        serde_json::from_str(include_str!("fixtures/comparisons.json")).unwrap();
+    for case in cases {
+        let (n, s) = (holding(&case.north), holding(&case.south));
+        let scoring = match case.scoring {
+            CaseScoring::Matchpoints(ref m) => {
+                assert_eq!(m, "matchpoints");
+                Scoring::Matchpoints
+            }
+            CaseScoring::Imps {
+                ref contract,
+                vulnerable,
+                need,
+            } => Scoring::Imps {
+                contract: contract.parse::<Contract>().unwrap(),
+                vulnerable,
+                need,
+            },
+        };
+        let name = format!("{n} / {s} {scoring:?}");
+        let c = Solver::new(n, s).unwrap().compare(scoring).unwrap();
+        // Each line plays as its trick distribution says
+        for l in &c.lines {
+            let a = |goal| Analysis {
+                north: n,
+                south: s,
+                goal,
+                score: l.score,
+                leads: Vec::new(),
+                plan: l.plan.clone(),
+                total: c.total,
+            };
+            let d = Constraints::default();
+            assert_eq!(evaluate(&a(Goal::ExactExpected), &d), l.score, "{name}");
+            for k in 1..l.tricks.len() {
+                let want: u64 = l.tricks[k..].iter().sum();
+                let target = Goal::Tricks { target: k as u8 };
+                assert_eq!(evaluate(&a(target), &d), want, "{name} {k} tricks");
+            }
+        }
+        assert_eq!(c.best.len() == 1, case.single, "{name}: best {:?}", c.best);
+        if let (Some(versus), Some(gain)) = (case.versus, case.gain) {
+            // Lines come most expected tricks first
+            let v = match versus {
+                Versus::Expected(ref e) => {
+                    assert_eq!(e, "expected");
+                    0
+                }
+                Versus::Target(k) => {
+                    let p = |i: usize| c.lines[i].tricks[usize::from(k)..].iter().sum::<u64>();
+                    let most = (0..c.lines.len()).map(p).max().unwrap();
+                    (0..c.lines.len()).find(|&i| p(i) == most).unwrap()
+                }
+            };
+            let b = c.best[0];
+            assert_eq!([c.gain[b][v], c.gain[v][b]], gain, "{name}");
+        }
+    }
 }

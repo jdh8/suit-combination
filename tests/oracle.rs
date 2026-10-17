@@ -25,7 +25,7 @@ use std::collections::HashMap;
 use std::rc::Rc;
 use std::sync::Mutex;
 use std::sync::atomic::{AtomicUsize, Ordering};
-use suit_combination::{Constraints, Error, Goal, Solver, TOTAL};
+use suit_combination::{Constraints, Error, Goal, Scoring, Solver, TOTAL};
 
 /// Seats by index, as the trick goes round
 const NORTH: usize = 0;
@@ -1092,4 +1092,359 @@ fn oracle_rules_hooks() {
     };
     let tricks = |entries| Solved::with(a, kq, south_entries(entries)).best(None) / TOTAL;
     assert_eq!((tricks(0), tricks(1)), (1, 2));
+}
+
+/// IMPs for `points` in favour, by the WBF scale, written apart from the
+/// engine's
+fn imps(points: i32) -> u64 {
+    let scale = [
+        20, 50, 90, 130, 170, 220, 270, 320, 370, 430, 500, 600, 750, 900, 1100, 1300, 1500, 1750,
+        2000, 2250, 2500, 3000, 3500, 4000,
+    ];
+    scale.iter().take_while(|&&t| points >= t).count() as u64
+}
+
+#[test]
+#[cfg_attr(debug_assertions, ignore = "slow unoptimized: run with --release")]
+fn coarse_oracle_agrees_on_line_comparisons() {
+    // The engine's lines treat cards declarer cannot yet tell apart alike,
+    // so they are the coarse oracle's root front, not the full oracle's:
+    // telling East's 7 from the 9 once the 8 between them is gone takes a
+    // trick more on West 9QJ in 32 / KT864, a line no class-blind strategy
+    // has (the full front has 59 such vectors to the engine's 58)
+    let mut fails = Vec::new();
+    for (n, s) in random_combos(80, 3, 6, 0x9E37_79B9_7F4A_7C15)
+        .into_iter()
+        .chain([(holding("32"), holding("KT864"))])
+    {
+        let missing = DECK & !n.to_bits() & !s.to_bits();
+        let mut coarse = Coarse {
+            missing,
+            memo: HashMap::new(),
+        };
+        let root = coarse.solve(CPos {
+            hands: [n.to_bits(), s.to_bits()],
+            canon: [0; 2],
+            out: [false; 2],
+            leader: NORTH,
+            trick: [0; 4],
+            count: 0,
+        });
+        let (lanes, front) = &*root;
+        let weights: Vec<u64> = lanes.iter().map(|l| vacant_places(missing, l.0)).collect();
+        let max = n.len().max(s.len());
+        let dist = |v: &Vector| {
+            let mut d = vec![0; max + 1];
+            for (i, &t) in v.iter().enumerate() {
+                d[usize::from(t)] += weights[i];
+            }
+            d
+        };
+        // Making only with every trick in the suit, so that undertricks
+        // count and no total passes 13: 3NT vulnerable, and 2NT not, where
+        // one down against making is 170 points, a step of the scale
+        let need = max as u8;
+        let imps_in = |contract: &str, vulnerable| Scoring::Imps {
+            contract: contract.parse().unwrap(),
+            vulnerable,
+            need,
+        };
+        let scorings = [
+            Scoring::Matchpoints,
+            imps_in("3N", true),
+            imps_in("2N", false),
+        ];
+        for scoring in scorings {
+            let gain = |x: u8, y: u8| match scoring {
+                Scoring::Matchpoints => u64::from(x > y),
+                Scoring::Imps {
+                    contract,
+                    vulnerable,
+                    ..
+                } => {
+                    let level = contract.bid.level.get();
+                    let score = |t: u8| contract.score(6 + level + t - need, vulnerable);
+                    imps(score(x) - score(y))
+                }
+            };
+            let c = Solver::new(n, s).unwrap().compare(scoring).unwrap();
+            let name = format!("{} {scoring:?}", name(n, s));
+            let mut want: Vec<Vec<u64>> = front.iter().map(dist).collect();
+            let mut got: Vec<Vec<u64>> = c.lines.iter().map(|l| l.tricks.clone()).collect();
+            want.sort();
+            got.sort();
+            if want != got {
+                fails.push(format!("{name}: lines {got:?} coarse oracle {want:?}"));
+                continue;
+            }
+            // Match lines by distribution where it tells them apart
+            let find = |d: &Vec<u64>| {
+                let mut it = front.iter().filter(|v| dist(v) == *d);
+                it.next().filter(|_| it.next().is_none())
+            };
+            for (a, la) in c.lines.iter().enumerate() {
+                for (b, lb) in c.lines.iter().enumerate() {
+                    let (Some(va), Some(vb)) = (find(&la.tricks), find(&lb.tricks)) else {
+                        continue;
+                    };
+                    let w: u64 = (0..va.len()).map(|i| weights[i] * gain(va[i], vb[i])).sum();
+                    if c.gain[a][b] != w {
+                        fails.push(format!(
+                            "{name} gain {a} {b}: engine {} oracle {w}",
+                            c.gain[a][b]
+                        ));
+                    }
+                }
+            }
+        }
+    }
+    assert!(
+        fails.is_empty(),
+        "
+{}",
+        fails.join(
+            "
+"
+        )
+    );
+}
+
+/// Position as declarer sees it under the engine's compression: a
+/// defender's card is seen only as its class (missing cards with no live
+/// declarer card between them), and classes merge as declarer's cards go.
+/// Standard rules only: either hand leads, the suit is played out.
+#[derive(Clone, Copy, PartialEq, Eq, Hash, Debug)]
+struct CPos {
+    hands: [u16; 2],
+    /// Per defender (East, West): in each class, as many of its lowest
+    /// ranks as cards that defender has played from it
+    canon: [u16; 2],
+    out: [bool; 2],
+    leader: usize,
+    /// Declarer's ranks; a defender's card as its class's lowest rank
+    trick: [u8; 4],
+    count: usize,
+}
+
+/// A concrete lane: (West's cards dealt, cards East played, cards West
+/// played).  Lanes stay concrete; only declarer's view is coarse.
+type Lane = (u16, u16, u16);
+
+/// The lanes declarer cannot tell apart at a position, and the front over them
+type Front = (Vec<Lane>, Vec<Vector>);
+
+/// Oracle restricted to strategies that depend on the coarse view only:
+/// the engine's model, solved independently of the engine
+struct Coarse {
+    missing: u16,
+    memo: HashMap<CPos, Rc<Front>>,
+}
+
+impl Coarse {
+    fn live(p: &CPos) -> u16 {
+        let mut live = p.hands[0] | p.hands[1];
+        for i in 0..p.count {
+            let s = (p.leader + i) % 4;
+            if s.is_multiple_of(2) && p.trick[s] != 0 {
+                live |= 1 << p.trick[s];
+            }
+        }
+        live
+    }
+
+    fn classes(&self, live: u16) -> Vec<u16> {
+        let mut out = Vec::new();
+        let mut cur = 0u16;
+        for r in 2..16u8 {
+            if r < 15 && self.missing >> r & 1 != 0 {
+                cur |= 1 << r;
+            } else if cur != 0 && (r == 15 || live >> r & 1 != 0) {
+                out.push(cur);
+                cur = 0;
+            }
+        }
+        out
+    }
+
+    /// `played` (concrete, or an older canonical form) as counts per class
+    fn canon(classes: &[u16], played: u16) -> u16 {
+        let mut c = 0;
+        for &k in classes {
+            let mut m = k;
+            for _ in 0..(played & k).count_ones() {
+                c |= m & m.wrapping_neg();
+                m &= m - 1;
+            }
+        }
+        c
+    }
+
+    /// Every concrete lane declarer cannot tell from the others at `p`
+    fn lanes(&self, p: &CPos) -> Vec<Lane> {
+        let cl = self.classes(Self::live(p));
+        let mut out = Vec::new();
+        for west in subsets(self.missing) {
+            let east = self.missing & !west;
+            for pe in subsets(east) {
+                if Self::canon(&cl, pe) != p.canon[0] || (p.out[0] && pe != east) {
+                    continue;
+                }
+                for pw in subsets(west) {
+                    if Self::canon(&cl, pw) == p.canon[1] && !(p.out[1] && pw != west) {
+                        out.push((west, pe, pw));
+                    }
+                }
+            }
+        }
+        out
+    }
+
+    fn play(&self, mut p: CPos, seat: usize, rank: u8) -> (CPos, bool) {
+        if p.count == 0 {
+            p.leader = seat;
+        }
+        if seat.is_multiple_of(2) {
+            p.hands[seat / 2] &= !(1u16 << rank);
+        } else if rank == 0 {
+            p.out[seat / 2] = true;
+        } else {
+            let cl = self.classes(Self::live(&p));
+            let c = *cl.iter().find(|&&k| k >> rank & 1 != 0).unwrap();
+            let free = c & !p.canon[seat / 2];
+            p.canon[seat / 2] |= free & free.wrapping_neg();
+        }
+        p.trick[seat] = rank;
+        p.count += 1;
+        if p.count < 4 {
+            return (p, false);
+        }
+        let winner = (0..4).max_by_key(|&s| p.trick[s]).unwrap();
+        p.leader = NORTH;
+        p.trick = [0; 4];
+        p.count = 0;
+        let cl = self.classes(Self::live(&p));
+        p.canon = p.canon.map(|c| Self::canon(&cl, c));
+        (p, winner % 2 == 0)
+    }
+
+    fn solve(&mut self, p: CPos) -> Rc<Front> {
+        if let Some(r) = self.memo.get(&p) {
+            return Rc::clone(r);
+        }
+        let lanes = self.lanes(&p);
+        let vecs = if p.count == 0 && p.hands == [0, 0] {
+            vec![vec![0; lanes.len()]]
+        } else if p.count.is_multiple_of(2) {
+            let seats: Vec<usize> = if p.count == 0 {
+                [NORTH, SOUTH]
+                    .into_iter()
+                    .filter(|&s| p.hands[s / 2] != 0)
+                    .collect()
+            } else {
+                vec![(p.leader + p.count) % 4]
+            };
+            let mut all = Vec::new();
+            for s in seats {
+                let h = p.hands[s / 2];
+                let ranks: Vec<u8> = if h == 0 { vec![0] } else { cards(h).collect() };
+                for r in ranks {
+                    let (ch, _) = self.play(p, s, r);
+                    let sub = self.solve(ch);
+                    let idx: HashMap<Lane, usize> =
+                        sub.0.iter().enumerate().map(|(i, &l)| (l, i)).collect();
+                    let map: Vec<usize> = lanes.iter().map(|l| idx[l]).collect();
+                    for y in &sub.1 {
+                        all.push(map.iter().map(|&i| y[i]).collect());
+                    }
+                }
+            }
+            prune(all)
+        } else {
+            self.defend(p, &lanes, (p.leader + p.count) % 4)
+        };
+        let out = Rc::new((lanes, vecs));
+        self.memo.insert(p, Rc::clone(&out));
+        out
+    }
+
+    /// A defender plays a class (or shows out); in each lane any card of
+    /// it they hold, the worst for declarer
+    fn defend(&mut self, p: CPos, lanes: &[Lane], seat: usize) -> Vec<Vector> {
+        let d = seat / 2;
+        let cl = self.classes(Self::live(&p));
+        let mut branches = Vec::new();
+        for c in cl.iter().copied().map(Some).chain([None]) {
+            let rank = c.map_or(0, |c| c.trailing_zeros() as u8);
+            let mut legal = Vec::new();
+            let mut opts: Vec<Vec<Lane>> = Vec::new();
+            for (j, l) in lanes.iter().enumerate() {
+                let (dealt, played) = if d == 1 {
+                    (l.0, l.2)
+                } else {
+                    (self.missing & !l.0, l.1)
+                };
+                let held = dealt & !played;
+                let xs: Vec<u16> = match c {
+                    Some(c) => cards(held & c).map(|r| 1u16 << r).collect(),
+                    None if held == 0 => vec![0],
+                    None => vec![],
+                };
+                if xs.is_empty() {
+                    continue;
+                }
+                legal.push(j);
+                opts.push(
+                    xs.iter()
+                        .map(|&x| {
+                            if d == 1 {
+                                (l.0, l.1, l.2 | x)
+                            } else {
+                                (l.0, l.1 | x, l.2)
+                            }
+                        })
+                        .collect(),
+                );
+            }
+            if legal.is_empty() {
+                continue;
+            }
+            let (ch, won) = self.play(p, seat, rank);
+            let sub = self.solve(ch);
+            let idx: HashMap<Lane, usize> =
+                sub.0.iter().enumerate().map(|(i, &l)| (l, i)).collect();
+            let ys: Vec<Vector> = sub
+                .1
+                .iter()
+                .map(|y| {
+                    opts.iter()
+                        .map(|o| o.iter().map(|l| y[idx[l]]).min().unwrap() + u8::from(won))
+                        .collect()
+                })
+                .collect();
+            branches.push((legal, prune(ys)));
+        }
+        branches.sort_by_key(|b| b.1.len());
+        let mut acc = vec![vec![u8::MAX; lanes.len()]];
+        for (legal, branch) in branches {
+            let mut next = Vec::new();
+            for x in &acc {
+                if branch
+                    .iter()
+                    .any(|y| legal.iter().enumerate().all(|(m, &j)| y[m] >= x[j]))
+                {
+                    next.push(x.clone());
+                    continue;
+                }
+                for y in &branch {
+                    let mut z = x.clone();
+                    for (m, &j) in legal.iter().enumerate() {
+                        z[j] = z[j].min(y[m]);
+                    }
+                    next.push(z);
+                }
+            }
+            acc = prune(next);
+        }
+        acc
+    }
 }

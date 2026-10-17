@@ -68,6 +68,22 @@ ranges such as `-,-1` (West at most one card) or `-,1-2`, `--first N|S`
 and `--entries NORTH,SOUTH` such as `-,1` (`-` for unlimited), `--rounds N`,
 `--lead CARD`, `--discard CARDS` and `--ruffs N,E,S,W`.
 
+`Solver::compare` scores lines against each other, as SuitPlay does:
+`Scoring::Matchpoints` counts how often one line takes more tricks than
+another, whatever the margin; `Scoring::Imps { contract, vulnerable, need }`
+counts the IMPs won (WBF scale) in a contract made with `need` tricks in the
+suit.  It returns every line on the Pareto front of tricks per layout, each
+with its trick distribution and plan, what each line gains over each other,
+and `best`: the smallest set of lines that beat or tie every line outside
+it.  One line there is the best; more mean no single best line, as
+preference can go round in a cycle (`AJ98 / K32` at matchpoints).  Lines
+treat cards declarer cannot yet tell apart alike, as the rest of the engine
+does.  That loses nothing for a target or expected tricks, but at MP or IMPs
+a line telling them apart can take a trick more on a layout:
+`32 / KT864`, reacting to East's 7 and 9 differently once the 8 is gone.
+The CLI takes `mp` and `imps CONTRACT NEED [--vulnerable]`, e.g.
+`solve Q543 AT2 imps 3N 2 --vulnerable`.
+
 A search can be given a budget.  `Solver::set_interrupt` takes a callback
 that is polled every 1024 or so states searched, with the number of states
 memoized; once it returns `true`, `analyze` fails with

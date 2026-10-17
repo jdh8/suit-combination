@@ -49,7 +49,7 @@
 //! never lead the suit: after winning a round they switch, and declarer
 //! comes back by an entry.
 
-use contract_bridge::{Holding, Rank, Seat};
+use contract_bridge::{Contract, Holding, Rank, Seat};
 use std::collections::HashMap;
 use std::fmt;
 use std::rc::Rc;
@@ -196,6 +196,85 @@ impl Analysis {
     pub fn value(&self) -> f64 {
         self.score as f64 / self.total as f64
     }
+}
+
+/// How [`Solver::compare`] scores one line against another, as SuitPlay does
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[cfg_attr(feature = "serde", derive(serde::Serialize))]
+#[cfg_attr(feature = "serde", serde(tag = "kind", rename_all = "snake_case"))]
+pub enum Scoring {
+    /// How often a line takes more tricks than the other, whatever the margin
+    Matchpoints,
+    /// Expected IMPs won, in `contract` (by a `vulnerable` declarer), which
+    /// it makes with `need` tricks in this suit: each trick more or less in
+    /// the suit is one more or less in all
+    Imps {
+        contract: Contract,
+        vulnerable: bool,
+        need: u8,
+    },
+}
+
+impl Scoring {
+    /// What line `a`'s `x` tricks in the suit win over line `b`'s `y`:
+    /// a deal (matchpoints) or IMPs
+    fn gain(self, x: u8, y: u8) -> u64 {
+        match self {
+            Self::Matchpoints => u64::from(x > y),
+            Self::Imps {
+                contract,
+                vulnerable,
+                need,
+            } => {
+                let made = 6 + contract.bid.level.get() + 13;
+                let score =
+                    |t: u8| contract.score((made + t - need).clamp(13, 26) - 13, vulnerable);
+                imps(score(x) - score(y))
+            }
+        }
+    }
+}
+
+/// IMPs for a difference of `points` in favour (0 if against), by the WBF
+/// scale
+fn imps(points: i32) -> u64 {
+    const SCALE: [i32; 24] = [
+        20, 50, 90, 130, 170, 220, 270, 320, 370, 430, 500, 600, 750, 900, 1100, 1300, 1500, 1750,
+        2000, 2250, 2500, 3000, 3500, 4000,
+    ];
+    SCALE.iter().filter(|&&t| points >= t).count() as u64
+}
+
+/// One line of a [`Comparison`]
+#[derive(Debug, Clone, PartialEq, Eq)]
+#[cfg_attr(feature = "serde", derive(serde::Serialize))]
+pub struct Line {
+    /// Expected tricks times [`Comparison::total`]
+    pub score: u64,
+    /// `tricks[k]`: weight of the layouts on which the line takes `k` tricks
+    pub tricks: Vec<u64>,
+    /// The line, its first card included
+    pub plan: Plan,
+}
+
+/// Result of [`Solver::compare`]
+#[derive(Debug, Clone, PartialEq, Eq)]
+#[cfg_attr(feature = "serde", derive(serde::Serialize))]
+pub struct Comparison {
+    pub scoring: Scoring,
+    /// Every line no other line takes as many tricks as on every layout
+    /// and more on one, most expected tricks first
+    pub lines: Vec<Line>,
+    /// `gain[a][b]`: what line `a` wins over line `b`, summed over layouts
+    /// by weight: deals for [`Scoring::Matchpoints`], IMPs times deals for
+    /// [`Scoring::Imps`].  Out of `total`.
+    pub gain: Vec<Vec<u64>>,
+    /// The smallest set of lines that beat or tie every line outside it
+    /// (where `a` beats `b` if `gain[a][b] > gain[b][a]`): one line is the
+    /// best; more mean no single best line, as preference can be cyclic.
+    pub best: Vec<usize>,
+    /// Weight of every layout: [`TOTAL`] without [`Constraints`]
+    pub total: u64,
 }
 
 /// What declarer knows of the defenders' hands besides the cards they play
@@ -1313,6 +1392,86 @@ impl Solver {
             leads,
             plan,
             total: structure.weight.iter().sum(),
+        })
+    }
+
+    /// Every line on the Pareto front of tricks per layout, compared pair
+    /// by pair under `scoring` (SuitPlay's line comparison), or
+    /// [`Error::Interrupted`] with a bound on expected tricks.  A line off
+    /// the front does no better against any line than the line above it.
+    pub fn compare(&mut self, scoring: Scoring) -> Result<Comparison, Error> {
+        self.armed = self.interrupt.is_some();
+        self.misses = 0;
+        let root = self.root();
+        let (vs, _) = self.feasible(root, Cut::ALL);
+        self.armed = false;
+        if std::mem::take(&mut self.interrupted) {
+            return Err(Error::Interrupted {
+                bound: self.ceiling(Goal::ExactExpected),
+                total: self.total(),
+            });
+        }
+        let s = self.structure(root.live());
+        let c = Self::consistent(&root, &s);
+        let goal = Goal::ExactExpected;
+        let mut vs: Vec<(u64, Tricks)> = vs
+            .into_iter()
+            .map(|v| (Self::score(&s, c, goal, 0, &v), v))
+            .collect();
+        vs.sort_by_key(|&(x, _)| std::cmp::Reverse(x));
+        let moves = self.declarer_moves(&root, &s);
+        let mut lines = Vec::new();
+        for &(score, v) in &vs {
+            let &(ch, at, cards) = moves
+                .iter()
+                .find(|&&(ch, _, _)| self.guarantees(ch, &v, s.len, goal))
+                .expect("a vector of the root comes from some lead");
+            let then = self.plan(ch, v, goal);
+            let plan = Self::declarer_step(at, cards, then);
+            let mut tricks = vec![0; usize::from(self.max_tricks()) + 1];
+            for i in c.iter() {
+                tricks[usize::from(v.get(i))] += s.weight[i];
+            }
+            lines.push(Line {
+                score,
+                tricks,
+                plan,
+            });
+        }
+        let gain: Vec<Vec<u64>> = vs
+            .iter()
+            .map(|(_, a)| {
+                vs.iter()
+                    .map(|(_, b)| {
+                        c.iter()
+                            .map(|i| s.weight[i] * scoring.gain(a.get(i), b.get(i)))
+                            .sum()
+                    })
+                    .collect()
+            })
+            .collect();
+        // The lines that reach every line by "beats or ties"
+        // ponytail: Floyd–Warshall, cubic in the lines (a few dozen at most
+        // seen); Tarjan's components if fronts grow to thousands
+        let n = vs.len();
+        let mut reach: Vec<Vec<bool>> = (0..n)
+            .map(|a| (0..n).map(|b| gain[a][b] >= gain[b][a]).collect())
+            .collect();
+        for k in 0..n {
+            let via = reach[k].clone();
+            for row in reach.iter_mut().filter(|row| row[k]) {
+                for (r, &v) in row.iter_mut().zip(&via) {
+                    *r |= v;
+                }
+            }
+        }
+        let best = (0..n).filter(|&a| reach[a].iter().all(|&r| r)).collect();
+        Ok(Comparison {
+            scoring,
+            lines,
+            gain,
+            best,
+            total: s.weight.iter().sum(),
         })
     }
 

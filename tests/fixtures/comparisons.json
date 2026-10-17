@@ -1,0 +1,17 @@
+[
+  {
+    "north": "AQT98", "south": "5432", "scoring": "matchpoints", "versus": "expected", "gain": [2437358, 2057510], "single": true,
+    "source": "SuitPlay help, Compare lines (https://jeroenwarmerdam.pythonanywhere.com/suitplay/help/CompareLines.html): small to the 10 is mp-best and beats small to the Q, the most expected tricks, on KJxx-, KJx-x, Jxx-K and loses on Kx-Jx, Kxx-J; deals rechecked by hand: C(22, 9) + 2 C(22, 10) + C(22, 10) = 2437358 against 2 C(22, 11) + C(22, 10) = 2057510, the published 3.6522 percent",
+    "checked": "2026-10-18"
+  },
+  {
+    "north": "Q543", "south": "AT2", "scoring": {"contract": "3N", "vulnerable": true, "need": 2}, "versus": 2, "gain": [1847560, 1679600], "single": true,
+    "source": "SuitPlay help, Compare lines: in 3NT vulnerable needing two tricks, the imp-best line beats the line securing two tricks by an overtrick IMP on Kxx-Jxx and xxx-KJx and loses 12 IMPs on J-Kxxxx (600 against -100) and one on KJ-xxxx; rechecked by hand: (6 + 4) C(20, 10) = 1847560 against 12 C(20, 12) + C(20, 11) = 1679600, the published 0.1777 and 0.1614 IMPs per deal (rounded percentages)",
+    "checked": "2026-10-18", "note": "Of the two lines securing two tricks equally, the one taking more tricks, as SuitPlay's secondary objective"
+  },
+  {
+    "north": "AJ98", "south": "K32", "scoring": "matchpoints", "single": false,
+    "source": "SuitPlay release history (https://jeroenwarmerdam.pythonanywhere.com/suitplay/Versions.html): no optimal MP line exists for AJ98 / K32",
+    "checked": "2026-10-18"
+  }
+]
