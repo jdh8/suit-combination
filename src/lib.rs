@@ -9,8 +9,9 @@
 //! <code>[TOTAL] = C(26, 13)</code>.  [`Constraints`] set other vacant
 //! places, cards known to be with East or West, and ranges of each
 //! defender's length and high-card points in the suit; scores are then out
-//! of [`Analysis::total`].  They also set which hand leads first and how
-//! many entries each hand has outside the suit.
+//! of [`Analysis::total`].  They also set where the lead starts, how many
+//! entries each hand has outside the suit, how many rounds are played, a
+//! fixed first card, and declarer's cards discarded elsewhere.
 //!
 //! The search is exact.  Instead of a greedy per-branch value — which is *not*
 //! optimal here, because a falsecarding defender spreads one layout's weight
@@ -68,7 +69,7 @@ pub enum Error {
     Overlap,
     /// More than [`MAX_MISSING`] cards missing
     TooManyMissing,
-    /// Target exceeds the longer hand (or is zero)
+    /// Target exceeds the longer hand or [`Constraints::rounds`] (or is zero)
     BadTarget,
     /// West was dealt a card North or South holds, or a hand the
     /// [`Constraints`] rule out
@@ -80,9 +81,10 @@ pub enum Error {
     /// [`Analysis::score`])
     Interrupted { bound: u64, total: u64 },
     /// Known cards that are not missing or are with both defenders, more
-    /// than 13 vacant places, a first leader not North or South, or no hand
+    /// than 13 vacant places, a first leader not North or South, no hand
     /// able to lead the first round (a void [`Constraints::first`] and no
-    /// entry to the other hand)
+    /// entry to the other hand, or no round), a discard not declarer's, or
+    /// a fixed lead that is not a card declarer may lead first
     BadConstraints,
     /// No layout fits the [`Constraints`]
     NoLayout,
@@ -95,12 +97,12 @@ impl fmt::Display for Error {
         f.write_str(match self {
             Self::Overlap => "North and South share a card",
             Self::TooManyMissing => "more than 8 cards missing",
-            Self::BadTarget => "target must be 1..=longer hand",
+            Self::BadTarget => "target must be 1..=longer hand and at most the rounds",
             Self::BadWest => "West holds a card of North or South",
             Self::NotPlayable => "that card cannot be played now",
             Self::BadConstraints => {
-                "known cards must be missing and with one defender; at most 13 vacant places; \
-                 North or South, holding a card, must be able to lead first"
+                "constraints do not fit the cards: known cards, vacant places, discards or \
+                 the first lead"
             }
             Self::NoLayout => "no layout fits the constraints",
             Self::Unsupported => "only trick targets take constraints",
@@ -222,6 +224,15 @@ pub struct Constraints {
     /// round from [`first`](Self::first); otherwise leading from it takes an
     /// entry.  After a defender wins a round, either hand needs one.
     pub entries: [Option<u8>; 2],
+    /// Rounds of the suit played before the analysis stops; tricks count
+    /// only in these.  13 plays the suit out.
+    pub rounds: u8,
+    /// Card North or South must lead to the first round
+    pub lead: Option<Rank>,
+    /// Cards of North, South never played in the suit (SuitPlay's
+    /// "discards or ruffs": spent in other suits).  They are not the
+    /// defenders' either.
+    pub discards: Holding,
 }
 
 impl Default for Constraints {
@@ -233,6 +244,9 @@ impl Default for Constraints {
             hcp: [[0, 10]; 2],
             first: None,
             entries: [None; 2],
+            rounds: 13,
+            lead: None,
+            discards: Holding::EMPTY,
         }
     }
 }
@@ -577,6 +591,11 @@ struct State {
     lead: u8,
     /// Entries left to North, South; [`UNLIMITED`] never runs out
     entries: [u8; 2],
+    /// Rounds left, the current one included; [`UNLIMITED`] when the
+    /// limit cannot bind
+    rounds: u8,
+    /// Card declarer must lead to the first round; 0 for none or later
+    fixed: u8,
 }
 
 /// [`State::entries`] of a hand with unlimited entries
@@ -589,9 +608,10 @@ impl State {
         self.ns[h] != 0 && (self.lead >> h & 1 != 0 || self.entries[h] > 0)
     }
 
-    /// Between tricks and no hand may lead: the suit is over for declarer
+    /// Between tricks and no round left or no hand may lead: the suit is
+    /// over for declarer
     fn is_over(&self) -> bool {
-        self.played == 0 && !self.may_lead(0) && !self.may_lead(1)
+        self.played == 0 && (self.rounds == 0 || !self.may_lead(0) && !self.may_lead(1))
     }
 
     /// Declarer cards still able to separate missing cards: in hand or on the table
@@ -956,6 +976,7 @@ impl Solver {
             || east & west != 0
             || constraints.vacant.iter().any(|&v| v > 13)
             || !matches!(constraints.first, None | Some(Seat::North | Seat::South))
+            || !(constraints.discards - north - south).is_empty()
         {
             return Err(Error::BadConstraints);
         }
@@ -978,7 +999,12 @@ impl Solver {
             interrupted: false,
             dd: None,
         };
-        if solver.root().is_over() {
+        let root = solver.root();
+        let leadable = |r: Rank| {
+            let r = r.get();
+            (0..2).any(|h| root.ns[h] >> r & 1 != 0 && root.may_lead(h))
+        };
+        if root.is_over() || constraints.lead.is_some_and(|r| !leadable(r)) {
             return Err(Error::BadConstraints);
         }
         if solver.total() == 0 {
@@ -1067,8 +1093,12 @@ impl Solver {
         map
     }
 
+    /// Most tricks declarer can take: the longer hand's cards in play, or
+    /// fewer rounds
     fn max_tricks(&self) -> u8 {
-        self.north.len().max(self.south.len()) as u8
+        let st = self.root();
+        let longer = st.ns[0].count_ones().max(st.ns[1].count_ones()) as u8;
+        longer.min(self.constraints.rounds)
     }
 
     fn check(&self, goal: Goal) -> Result<(), Error> {
@@ -1083,21 +1113,31 @@ impl Solver {
     }
 
     fn root(&self) -> State {
-        let entries = self.constraints.entries.map(|e| e.unwrap_or(UNLIMITED));
+        let c = &self.constraints;
+        let ns = [self.north, self.south].map(|h| (h - c.discards).to_bits());
+        let longer = ns[0].count_ones().max(ns[1].count_ones()) as u8;
+        let entries = c.entries.map(|e| e.unwrap_or(UNLIMITED));
         let unlimited = u8::from(entries[0] == UNLIMITED) | u8::from(entries[1] == UNLIMITED) << 1;
         State {
-            ns: [self.north.to_bits(), self.south.to_bits()],
+            ns,
             shown: [[0; MAX_MISSING]; 2],
             void: [false; 2],
             leader: NORTH,
             trick: [0; 4],
             played: 0,
-            lead: match self.constraints.first {
+            lead: match c.first {
                 Some(Seat::North) => 1 | unlimited,
                 Some(Seat::South) => 2 | unlimited,
                 _ => 3,
             },
             entries,
+            // Each round takes a card of the longer hand
+            rounds: if c.rounds >= longer {
+                UNLIMITED
+            } else {
+                c.rounds
+            },
+            fixed: c.lead.map_or(0, Rank::get),
         }
     }
 
@@ -1337,12 +1377,8 @@ impl Solver {
                     let k = i / c.stride % (usize::from(c.size) + 1);
                     acc | ranks(c.ranks).take(k).fold(0, |a, r| a | 1 << r)
                 });
-                let hands = [
-                    self.north.to_bits(),
-                    self.missing & !west,
-                    self.south.to_bits(),
-                    west,
-                ];
+                let [north, south] = self.root().ns;
+                let hands = [north, self.missing & !west, south, west];
                 memo.clear();
                 dd_tricks(hands, &mut memo)
             })
@@ -1422,6 +1458,9 @@ impl Solver {
         st.trick = [0; 4];
         st.played = 0;
         st.leader = NORTH;
+        if st.rounds != UNLIMITED {
+            st.rounds -= 1;
+        }
         let coarse = self.structure(st.live());
         if coarse.classes.len() != s.classes.len() {
             let shown = st.shown;
@@ -1447,6 +1486,7 @@ impl Solver {
             }
             ch.leader = at;
             ch.lead = 0;
+            ch.fixed = 0;
         }
         ch.ns[at as usize / 2] &= !(1 << rank);
         self.advance(ch, s, rank).0
@@ -1475,6 +1515,9 @@ impl Solver {
                 continue;
             }
             for class in Self::classes(st, s, hand) {
+                if st.fixed != 0 && class >> st.fixed & 1 == 0 {
+                    continue;
+                }
                 out.push((self.declarer_play(st, s, at, lowest(class)), at, class));
             }
         }
@@ -2101,8 +2144,9 @@ impl Solver {
         if need == 0 {
             return (vec![c], true);
         }
-        let remaining =
-            st.ns[0].count_ones().max(st.ns[1].count_ones()) as u8 + u8::from(st.played > 0);
+        let remaining = (st.ns[0].count_ones().max(st.ns[1].count_ones()) as u8
+            + u8::from(st.played > 0))
+        .min(st.rounds);
         if need > remaining || st.is_over() {
             return (vec![Set::EMPTY], true);
         }

@@ -28,7 +28,8 @@ Assumptions, as in Pavlicek's card-combination tables: unlimited entries to
 both hands, no ruffs, no inference about the enemy hands, only tricks in this
 suit count.  Up to 8 missing cards.  For trick targets, `Constraints` set
 other vacant places, cards known to be with East or West, length and HCP
-ranges, the hand the lead starts in and finite entries.
+ranges, the hand the lead starts in, finite entries, a limit on rounds, a
+fixed first card and discards.
 
 ## Library
 
@@ -56,12 +57,16 @@ entries to North and South in other suits.  A hand leads free after winning
 the last round of the suit, or for the first round from the hand the lead
 starts in (either, if none is named); otherwise the lead takes
 one of its entries, as in SuitPlay (the defenders, after winning a round,
-switch suits).  Only trick targets take them
+switch suits).  They also take a limit on the rounds played (tricks count
+only within them), a card declarer must lead first, and discards: declarer's
+cards spent in other suits, out of play but not given to the defenders, as
+SuitPlay's "discards or ruffs".  Only trick targets take them
 (`Error::Unsupported` otherwise), and scores are then out of
 `Analysis::total`, not `TOTAL`.  The CLI takes `--vacant EAST,WEST`,
 `--east CARDS`, `--west CARDS`, `--length EAST,WEST` and `--hcp EAST,WEST`,
 ranges such as `-,-1` (West at most one card) or `-,1-2`, `--first N|S`
-and `--entries NORTH,SOUTH` such as `-,1` (`-` for unlimited).
+and `--entries NORTH,SOUTH` such as `-,1` (`-` for unlimited), `--rounds N`,
+`--lead CARD` and `--discard CARDS`.
 
 Every `Analysis` says whether it is `proven`: its `score` equals its `bound`,
 so no line does better.  Only a `Goal::Expected` line can fall short; the

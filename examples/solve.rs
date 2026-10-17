@@ -1,6 +1,7 @@
 //! `cargo run --release --example solve -- AJ52 K76 [TARGET|ev|exact] [--budget SECS]
 //! [--vacant EAST,WEST] [--east CARDS] [--west CARDS] [--length EAST,WEST]
-//! [--hcp EAST,WEST] [--first N|S] [--entries NORTH,SOUTH]`
+//! [--hcp EAST,WEST] [--first N|S] [--entries NORTH,SOUTH] [--rounds N]
+//! [--lead CARD] [--discard CARDS]`
 //!
 //! Prints the value of every goal (or just the one given) with its status,
 //! and the line for the goal shown last.  `--budget` gives each goal at most
@@ -9,10 +10,12 @@
 //! to be with them, `--length` and `--hcp` (this suit only) ranges such as
 //! `3`, `2-4`, `-2`, `3-` or `-` for any, e.g. `--length -,-1`.  `--first`
 //! names the hand the lead starts in, `--entries` each hand's entries in
-//! other suits, `-` for unlimited, e.g. `--entries -,1`.  Only trick targets
-//! take these.
+//! other suits, `-` for unlimited, e.g. `--entries -,1`.  `--rounds` stops
+//! after that many rounds, `--lead` fixes declarer's first card, and
+//! `--discard` takes declarer's cards out of play (not to the defenders).
+//! Only trick targets take these.
 
-use contract_bridge::{Holding, Seat};
+use contract_bridge::{Holding, Rank, Seat};
 use std::time::{Duration, Instant};
 use suit_combination::{Constraints, Error, Goal, Solver};
 
@@ -34,7 +37,7 @@ fn holding(seat: &str, s: &str) -> Holding {
 
 const USAGE: &str = "usage: solve NORTH SOUTH [TARGET|ev|exact] [--budget SECS] \
     [--vacant EAST,WEST] [--east CARDS] [--west CARDS] [--length EAST,WEST] [--hcp EAST,WEST] \
-    [--first N|S] [--entries NORTH,SOUTH]";
+    [--first N|S] [--entries NORTH,SOUTH] [--rounds N] [--lead CARD] [--discard CARDS]";
 
 /// Removes `--flag VALUE` from `args`, returning the value
 fn flag(args: &mut Vec<String>, name: &str) -> Option<String> {
@@ -113,6 +116,18 @@ fn main() {
             fail("--entries: NORTH,SOUTH expected, e.g. -,1");
         };
         constraints.entries = [north, south];
+    }
+    if let Some(v) = flag(&mut args, "--rounds") {
+        constraints.rounds = v
+            .parse()
+            .unwrap_or_else(|_| fail("--rounds: a number expected"));
+    }
+    if let Some(v) = flag(&mut args, "--lead") {
+        let rank = v.parse::<Rank>();
+        constraints.lead = Some(rank.unwrap_or_else(|_| fail("--lead: a card expected, e.g. A")));
+    }
+    if let Some(v) = flag(&mut args, "--discard") {
+        constraints.discards = holding("discard", &v);
     }
     let [north, south, rest @ ..] = args.as_slice() else {
         fail(USAGE);

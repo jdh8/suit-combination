@@ -55,6 +55,10 @@ struct Rules {
     entries: u8,
     /// Tricks played before the analysis stops
     rounds: u8,
+    /// Card declarer must lead to the first trick
+    lead: Option<u8>,
+    /// Declarer's cards kept out of play, and out of the defenders' hands
+    discards: u16,
     /// Weight of the layout in which West holds exactly these cards (bit
     /// `r` = rank `r`); 0 rules the layout out
     weight: Box<dyn Fn(u16) -> u64>,
@@ -69,6 +73,8 @@ impl Rules {
             access: Box::new(|_, e| [Some(e); 2]),
             entries: 0,
             rounds: 13,
+            lead: None,
+            discards: 0,
             weight: Box::new(move |west| vacant_places(missing, west)),
         }
     }
@@ -99,8 +105,10 @@ impl Rules {
         Self {
             access: Box::new(access),
             entries: nibble(c.entries[0]) | nibble(c.entries[1]) << 4,
+            rounds: c.rounds,
+            lead: c.lead.map(Rank::get),
+            discards: c.discards.to_bits(),
             weight: Box::new(move |west| constrained(missing, west, c)),
-            ..Self::standard(north, south)
         }
     }
 }
@@ -216,8 +224,11 @@ fn prune(vs: Vec<Vector>) -> Vec<Vector> {
 
 struct Oracle {
     rules: Rules,
+    /// Cards in play of North, South
     north: u16,
     south: u16,
+    /// Cards East and West share: neither declarer's nor discarded
+    missing: u16,
     /// West's cards in each layout of nonzero weight
     layouts: Vec<u16>,
     weights: Vec<u64>,
@@ -228,8 +239,12 @@ struct Oracle {
 
 impl Oracle {
     fn new(north: Holding, south: Holding, rules: Rules) -> Self {
-        let (north, south) = (north.to_bits(), south.to_bits());
-        let layouts: Vec<u16> = subsets(DECK & !north & !south)
+        let missing = DECK & !north.to_bits() & !south.to_bits();
+        let (north, south) = (
+            north.to_bits() & !rules.discards,
+            south.to_bits() & !rules.discards,
+        );
+        let layouts: Vec<u16> = subsets(missing)
             .filter(|&west| (rules.weight)(west) > 0)
             .collect();
         let weights = layouts.iter().map(|&w| (rules.weight)(w)).collect();
@@ -237,6 +252,7 @@ impl Oracle {
             rules,
             north,
             south,
+            missing,
             layouts,
             weights,
             memo: HashMap::new(),
@@ -245,7 +261,7 @@ impl Oracle {
     }
 
     fn missing(&self) -> u16 {
-        DECK & !self.north & !self.south
+        self.missing
     }
 
     /// Cards dealt to `seat` (East or West) in the layout `west`
@@ -318,7 +334,7 @@ impl Oracle {
 
     /// Declarer's options: (seat, rank played, resulting position).  Every
     /// card is its own move; a void hand discards in third seat and cannot
-    /// lead.
+    /// lead; the first lead may be fixed.
     fn declarer_moves(&self, p: &Pos) -> Vec<(usize, u8, Pos)> {
         let seats: Vec<usize> = if p.count == 0 {
             [NORTH, SOUTH]
@@ -335,7 +351,10 @@ impl Oracle {
                 out.push((seat, 0, self.play(*p, seat, 0).0));
             }
             for r in cards(hand) {
-                out.push((seat, r, self.play(*p, seat, r).0));
+                let fixed = p.round == 0 && p.count == 0 && self.rules.lead.is_some();
+                if !fixed || self.rules.lead == Some(r) {
+                    out.push((seat, r, self.play(*p, seat, r).0));
+                }
             }
         }
         out
@@ -535,7 +554,8 @@ fn compare(north: Holding, south: Holding, c: Constraints, o: &Solved) -> (Vec<S
     let mut checks = 0;
     let name = format!("{} {c:?}", name(north, south));
     let mut solver = Solver::with_constraints(north, south, c).unwrap();
-    let longer = north.len().max(south.len()) as u8;
+    let d = c.discards;
+    let longer = ((north - d).len().max((south - d).len()) as u8).min(c.rounds);
     // Only trick targets take constraints
     let ev = if c == Constraints::default() {
         &[(Goal::ExactExpected, None), (Goal::Expected, None)][..]
@@ -563,7 +583,8 @@ fn compare(north: Holding, south: Holding, c: Constraints, o: &Solved) -> (Vec<S
         }
         let cards: usize = a.leads.iter().map(|l| l.cards.len()).sum();
         checks += 1;
-        if cards != o.leads.len() {
+        // A fixed lead is one card to the oracle, its class to the engine
+        if c.lead.is_none() && cards != o.leads.len() {
             fails.push(format!(
                 "{name} {goal:?}: engine leads {cards} cards, oracle {}",
                 o.leads.len()
@@ -712,7 +733,10 @@ fn oracle_agrees_on_random_small_combinations() {
 /// three that it is known to be with East or West; even chances of a random
 /// length range and of a random HCP range for one defender; a random first
 /// lead or none, and for each declarer hand even chances of 0 to 2
-/// entries; seeded by the combination; sometimes no layout fits
+/// entries; one chance in three of a random limit on rounds, one in eight
+/// that each declarer card is discarded, and one in four of a random
+/// fixed lead; seeded by the combination; sometimes no layout fits or no
+/// lead is legal
 fn random_constraints(north: Holding, south: Holding) -> Constraints {
     let mut x = u64::from(north.to_bits()) << 16 | u64::from(south.to_bits()) | 1 << 40;
     let mut rand = move || {
@@ -755,6 +779,19 @@ fn random_constraints(north: Holding, south: Holding) -> Constraints {
         if rand() % 2 == 0 {
             *e = Some((rand() % 3) as u8);
         }
+    }
+    let declarer = north.to_bits() | south.to_bits();
+    if rand() % 3 == 0 {
+        c.rounds = 1 + (rand() % u64::from(north.len().max(south.len()).max(1) as u8)) as u8;
+    }
+    for r in cards(declarer) {
+        if rand() % 8 == 0 {
+            c.discards |= Holding::from_bits_truncate(1 << r);
+        }
+    }
+    let left: Vec<u8> = cards(declarer & !c.discards.to_bits()).collect();
+    if rand() % 4 == 0 && !left.is_empty() {
+        c.lead = Some(Rank::new(left[(rand() % left.len() as u64) as usize]));
     }
     c
 }
@@ -801,6 +838,9 @@ fn oracle_agrees_on_reference_cases() {
         hcp: Option<[[u8; 2]; 2]>,
         first: Option<String>,
         entries: Option<[Option<u8>; 2]>,
+        rounds: Option<u8>,
+        lead: Option<String>,
+        discard: Option<String>,
         score: Option<u64>,
         value: Option<f64>,
         tolerance: Option<f64>,
@@ -823,6 +863,9 @@ fn oracle_agrees_on_reference_cases() {
                 _ => Seat::South,
             }),
             entries: c.entries.unwrap_or(d.entries),
+            rounds: c.rounds.unwrap_or(d.rounds),
+            lead: c.lead.as_deref().map(|r| r.parse().unwrap()),
+            discards: known(&c.discard),
         };
         let combo = (holding(&c.north), holding(&c.south), constraints);
         if 13 - combo.0.len() - combo.1.len() > 8 {

@@ -32,6 +32,12 @@ struct Case {
     first: Option<String>,
     /// Outside entries to North, South; null = unlimited
     entries: Option<[Option<u8>; 2]>,
+    /// Rounds played before the analysis stops
+    rounds: Option<u8>,
+    /// Card declarer must lead first
+    lead: Option<String>,
+    /// Declarer's cards kept out of play
+    discard: Option<String>,
     score: Option<u64>,
     /// The constrained denominator; [`TOTAL`] if absent
     total: Option<u64>,
@@ -66,6 +72,9 @@ impl Case {
                 _ => panic!("first: {s}?"),
             }),
             entries: self.entries.unwrap_or(d.entries),
+            rounds: self.rounds.unwrap_or(d.rounds),
+            lead: self.lead.as_deref().map(|r| r.parse().unwrap()),
+            discards: known(&self.discard),
         }
     }
 }
@@ -96,12 +105,20 @@ struct Pos {
     free: [bool; 2],
     /// Outside entries left to North, South; `None` = unlimited
     entries: [Option<u8>; 2],
+    /// Rounds left to play
+    rounds: u8,
+    /// Card the first lead must be (or be equivalent to)
+    fixed: Option<u8>,
 }
 
 impl Pos {
-    /// Declarer's hand `h` (0 North, 1 South) leads, spending an entry
-    /// unless it may lead free
-    fn lead(&mut self, h: usize) {
+    /// Declarer's hand `h` (0 North, 1 South) leads one of `cards`,
+    /// spending an entry unless it may lead free
+    fn lead(&mut self, h: usize, cards: u16) {
+        assert!(self.rounds > 0, "a round past the last");
+        if let Some(r) = self.fixed.take() {
+            assert!(cards >> r & 1 != 0, "not the fixed lead");
+        }
         if !self.free[h]
             && let Some(e) = &mut self.entries[h]
         {
@@ -120,6 +137,7 @@ impl Pos {
             let seat = (self.leader + winner) % 4;
             self.won += u8::from(seat.is_multiple_of(2));
             self.free = [seat == 0, seat == 2];
+            self.rounds -= 1;
             self.trick = [0; 4];
             self.played = 0;
         }
@@ -136,7 +154,7 @@ fn follow(plan: &Plan, mut p: Pos) -> u8 {
             let at = seat_index(*seat);
             if p.played == 0 {
                 p.leader = at;
-                p.lead(at / 2);
+                p.lead(at / 2, cards.to_bits());
             }
             let choice = cards.to_bits() & p.hands[at];
             let rank = if choice == 0 {
@@ -203,13 +221,20 @@ fn evaluate(a: &Analysis, c: &Constraints) -> u64 {
     let mut total = 0;
     loop {
         let p = Pos {
-            hands: [a.north.to_bits(), missing & !west, a.south.to_bits(), west],
+            hands: [
+                (a.north - c.discards).to_bits(),
+                missing & !west,
+                (a.south - c.discards).to_bits(),
+                west,
+            ],
             leader: 0,
             trick: [0; 4],
             played: 0,
             won: 0,
             free: [Seat::North, Seat::South].map(|h| c.first.is_none_or(|f| f == h)),
             entries: c.entries,
+            rounds: c.rounds,
+            fixed: c.lead.map(Rank::get),
         };
         let weight = weight(missing, west, c);
         let tricks = if weight == 0 { 0 } else { follow(&a.plan, p) };

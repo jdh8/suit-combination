@@ -244,6 +244,18 @@ lead charged, or a named one ignored. SuitC's probe values for `AJT / 432`
 (32.96%, 76.00%) agree but are not fixtures. Defaults byte-identical on
 3,000 combinations and 400 exact, at the same speed.
 
+Item 3 so far: a limit on rounds (SuitC's trick limit: tricks count only
+within it), a fixed first card (SuitC's "lead card"; `Analysis::leads`
+already scores every first card, this also gives the line after one), and
+discards (SuitPlay's: declarer's card leaves play and is not the
+defenders'), as `Constraints::rounds`, `lead`, `discards` and CLI
+`--rounds`/`--lead`/`--discard`. Checked by hand derivations (SuitC
+probes agreed on the round limits), CCAnalyser's published first-card
+values for `AQJT / 65432` (N:A 12.43% and 12.49% at 8/11, N:Q 0.00%), the
+evaluator enforcing each option, and the oracle sweep with random limits,
+discards and first cards; mutants of each are caught. Defaults
+byte-identical, same speed. Ruffs are next.
+
 **Done:** each option matches independent target examples; defaults
 reproduce phase 1; `AQ / 2` solves; unsupported option combinations,
 including a new option with an expected-tricks goal, are rejected clearly.

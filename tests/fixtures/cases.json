@@ -310,5 +310,50 @@
     "north": "AKQ2", "south": "543", "goal": 4, "first": "S", "entries": [0, null], "score": 3695120,
     "source": "Hand derivation: North wins every round it leads, so needs no entry; the 2 is the fourth trick on a 3-3 split: 20 C(20, 10)",
     "checked": "2026-10-18", "note": "Winning a round keeps the lead in that hand"
+  },
+  {
+    "north": "AKQ2", "south": "543", "goal": 3, "rounds": 3, "score": 10400600,
+    "source": "Hand derivation: three rounds, three top winners",
+    "checked": "2026-10-18", "note": "Four tricks is a bad target with three rounds"
+  },
+  {
+    "north": "AQJT", "south": "65432", "goal": 4, "rounds": 4, "score": 5200300, "leads": ["6"],
+    "source": "Hand derivation: in four rounds the K must not win one, so the finesse wins exactly when West holds it: C(25, 12). Played out, four tricks are certain",
+    "checked": "2026-10-18"
+  },
+  {
+    "north": "KQT32", "south": "654", "goal": 2, "rounds": 2, "score": 0,
+    "source": "Hand derivation: whoever holds the A takes one of the first two rounds",
+    "checked": "2026-10-18"
+  },
+  {
+    "north": "KQT32", "south": "654", "goal": 1, "rounds": 2, "score": 10400600,
+    "source": "Hand derivation: K then Q, one of which wins",
+    "checked": "2026-10-18"
+  },
+  {
+    "north": "AQJT", "south": "65432", "goal": 5, "lead": "A", "score": 1293292,
+    "source": "Bridge CCAnalyser guide p. 5 (variant N:A, 12.43 percent); hand derivation: after the A no finesse can catch a K left with West, so only a singleton K falls: C(22, 12) + C(22, 10)",
+    "checked": "2026-10-18"
+  },
+  {
+    "north": "AQJT", "south": "65432", "goal": 5, "lead": "Q", "score": 0,
+    "source": "Bridge CCAnalyser guide p. 5 (variant N:Q, 0.00 percent); hand derivation: the K, wherever it is, takes the Q",
+    "checked": "2026-10-18"
+  },
+  {
+    "north": "AQJT", "south": "65432", "goal": 5, "vacant": [11, 8], "lead": "A", "score": 9438, "total": 75582,
+    "source": "Bridge CCAnalyser guide p. 9 (variant N:A, 12.49 percent); hand derivation: West 8, East 11 vacant places; a singleton K with West in C(15, 7) deals, with East (West K987 short of it: 987) in C(15, 5)",
+    "checked": "2026-10-18"
+  },
+  {
+    "north": "AKQ32", "south": "54", "goal": 4, "score": 8733920,
+    "source": "Hand derivation: the 2 or 3 is the fourth trick on 3-3 or 4-2: 20 C(20, 10) + 2 x 15 C(20, 9)",
+    "checked": "2026-10-18", "note": "Baseline for the discard below"
+  },
+  {
+    "north": "AKQ32", "south": "54", "goal": 4, "discard": "2", "score": 3695120,
+    "source": "Hand derivation (SuitPlay's discard: the card leaves play, not to the defenders): AKQ3 opposite 54 against the same six cards takes four only on 3-3: 20 C(20, 10)",
+    "checked": "2026-10-18", "note": "Handing the 2 to the defenders would make seven missing cards and a different answer"
   }
 ]
