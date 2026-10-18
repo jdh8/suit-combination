@@ -1120,6 +1120,9 @@ impl std::hash::Hasher for Fx {
 
 type FxMap<K, V> = HashMap<K, V, std::hash::BuildHasherDefault<Fx>>;
 
+/// At a defender's turn, a card's layouts as lanes and the ways on after it
+type Way = (Tricks, Vec<Tricks>);
+
 /// A search of lines by how they compare with a line
 struct Banded {
     scoring: Scoring,
@@ -1640,23 +1643,19 @@ impl Solver {
                 open = true;
                 break;
             };
-            let Some(z) = beater else {
+            let Some((k, z)) = beater else {
                 proven = true;
                 break;
             };
+            let (ch, at, cards) = moves[k];
             let mut b = self.banded.take();
-            let (plan, v) = self.realize(b.as_mut(), root, 0, z);
+            let (then, v) = self.realize(b.as_mut(), ch, 0, z);
             self.banded = b;
             if self.interrupted {
                 open = true;
                 break;
             }
-            let Plan::Declarer { cards, .. } = &plan else {
-                unreachable!("a line starts with a lead")
-            };
-            let k = (moves.iter())
-                .position(|&(_, _, m)| m == cards.to_bits())
-                .expect("a first card is a move");
+            let plan = Self::declarer_step(at, cards, then);
             top = match found.iter().position(|f| f.1 == v) {
                 Some(i) => i,
                 None => {
@@ -1955,12 +1954,12 @@ impl Solver {
         }
     }
 
-    /// The way of comparing with `line` (tricks per root layout, clamped as
-    /// [`banded`](Self::banded) does) of the lines beating it by most
-    /// under `scoring`, if any does; `Err` if interrupted.  The search is
-    /// kept in [`banded`](Self::banded), to go on with if asked again and
-    /// for [`realize`](Self::realize).
-    fn beater(&mut self, scoring: Scoring, line: Tricks) -> Result<Option<Tricks>, ()> {
+    /// The first move and the way of comparing with `line` (tricks per root
+    /// layout, clamped as [`banded`](Self::banded) does) of the lines
+    /// beating it by most under `scoring`, if any does; `Err` if
+    /// interrupted.  The search is kept in [`banded`](Self::banded), to go
+    /// on with if asked again and for [`realize`](Self::realize).
+    fn beater(&mut self, scoring: Scoring, line: Tricks) -> Result<Option<(usize, Tricks)>, ()> {
         let root = self.root();
         let s = self.structure(root.live());
         let c = Self::consistent(&root, &s);
@@ -1976,37 +1975,128 @@ impl Solver {
             return Ok(None);
         }
         let budget = (top - 1) as u64;
+        // Per layout and tricks, what the layout adds to the gain
+        let value: Vec<Vec<i64>> = (0..s.len)
+            .map(|r| {
+                let w = if c.contains(r) { s.weight[r] as i64 } else { 0 };
+                (0..=max).map(|x| w * scoring.net(x, line.get(r))).collect()
+            })
+            .collect();
         let mut b = match self.banded.take() {
             Some(b) if b.scoring == scoring && b.line == line && b.budget == budget => b,
             _ => {
-                let value: Vec<Vec<i64>> = (0..s.len)
-                    .map(|r| {
-                        let w = if c.contains(r) { s.weight[r] as i64 } else { 0 };
-                        (0..=max).map(|x| w * scoring.net(x, line.get(r))).collect()
-                    })
-                    .collect();
                 let mass: Vec<u64> = (0..s.len)
                     .map(|r| if c.contains(r) { s.weight[r] } else { 0 })
                     .collect();
                 Banded::new(&value, &mass, most, root.live(), (scoring, line, budget))
             }
         };
-        let front = self.banded(&mut b, root, 0, budget);
+        // A lead keeps the root's layouts: its search is the root's.
+        let mut best = None;
+        let mut floor = 0;
+        for (k, (ch, _, _)) in self.declarer_moves(&root, &s).into_iter().enumerate() {
+            let Some((start, mut subs)) = self.subs(&mut b, &ch, 0, budget) else {
+                break;
+            };
+            subs.sort_by_key(|(_, sub)| sub.len());
+            let mut own = vec![(Tricks::ZERO, Vec::new()); subs.len()];
+            for r in c.iter() {
+                if let Some(j) = subs.iter().rposition(|(m, _)| m.get(r) != 0) {
+                    own[j].0.set(r, 0xFF);
+                    own[j].1.push(r);
+                }
+            }
+            let mut found = None;
+            self.deepest(
+                &subs,
+                &own,
+                start,
+                s.len,
+                &value,
+                &mut floor,
+                &mut found,
+                &mut FxMap::default(),
+            );
+            if let Some(z) = found {
+                best = Some((k, z));
+            }
+            if self.interrupted {
+                break;
+            }
+        }
         self.banded = Some(b);
         if self.interrupted {
             return Err(());
         }
-        let gain = |z: &Tricks| -> i64 {
-            c.iter()
-                .map(|r| s.weight[r] as i64 * scoring.net(z.get(r), line.get(r)))
-                .sum()
+        Ok(best)
+    }
+
+    /// Depth first through a defender's merge of `subs` from `x`: each
+    /// vector of a card's way on in turn, cut once the merge can gain no
+    /// more than `floor` (`gain` adds `value` over the lanes, rising with
+    /// each).  Raises `floor` to, and keeps in `found`, the best gain past
+    /// it.  `own[k]` are the lanes no card after `k` lowers, as a mask and
+    /// a list; `drops` keeps each card's least drop on them per merge so far.
+    #[allow(clippy::too_many_arguments)]
+    fn deepest(
+        &mut self,
+        subs: &[Way],
+        own: &[(Tricks, Vec<usize>)],
+        x: Tricks,
+        len: usize,
+        value: &[Vec<i64>],
+        floor: &mut i64,
+        found: &mut Option<Tricks>,
+        drops: &mut FxMap<(usize, Tricks), i64>,
+    ) {
+        let val = |t: u8, r: usize| value[r][usize::from(t).min(value[r].len() - 1)];
+        let gain = |v: &Tricks| -> i64 { (0..len).map(|r| val(v.get(r), r)).sum() };
+        let Some(((mask, sub), rest)) = subs.split_first() else {
+            *floor = gain(&x);
+            *found = Some(x);
+            return;
         };
-        Ok(front
-            .into_iter()
+        if self.tick() {
+            return;
+        }
+        // Each card to come lowers its own lanes by at least its least
+        // drop there, and no two cards own a lane.
+        // The least drop depends on `x` only on the lanes owned.
+        let mut most = gain(&x);
+        for (k, ((_, sub), (mask, own))) in subs.iter().zip(own).enumerate() {
+            let mut key = x;
+            for (a, m) in key.0.iter_mut().zip(mask.0) {
+                *a &= m;
+            }
+            let least = *drops.entry((subs.len() - k, key)).or_insert_with(|| {
+                let drop = |y: &Tricks| -> i64 {
+                    own.iter()
+                        .map(|&r| val(x.get(r), r) - val(x.get(r).min(y.get(r)), r))
+                        .sum()
+                };
+                sub.iter().map(drop).min().unwrap_or(0)
+            });
+            most -= least;
+            if most <= *floor {
+                return;
+            }
+        }
+        let words = len.div_ceil(8);
+        let next: Vec<Tricks> = (sub.iter())
+            .map(|y| x.min_on(y, mask, words))
+            .filter(|z| gain(z) > *floor)
+            .collect();
+        // Capped by `x`, one way on often covers another: drop the other.
+        let mut next: Vec<(i64, Tricks)> = (maximal(next, len, None).into_iter())
             .map(|z| (gain(&z), z))
-            .filter(|&(g, _)| g > 0)
-            .max_by_key(|&(g, _)| g)
-            .map(|(_, z)| z))
+            .collect();
+        next.sort_by_key(|n| std::cmp::Reverse(n.0));
+        for (g, z) in next {
+            if g <= *floor || self.interrupted {
+                break;
+            }
+            self.deepest(rest, &own[1..], z, len, value, floor, found, drops);
+        }
     }
 
     /// A plan from `st`, after `won` tricks, taking at least `req` per
@@ -2562,42 +2652,9 @@ impl Solver {
             out.retain(|v| lost(v) <= budget);
             out
         } else {
-            let mut start = Tricks::ZERO;
-            for i in c.iter() {
-                start.set(i, 127);
-            }
-            let mut subs = Vec::new();
-            for (_, g, ch, w) in self.defender_moves(&st, &s, c) {
-                let map = self.map(&st, &ch);
-                let bonus = u8::from(w);
-                let vs = self.banded(b, ch, won + bonus, budget);
-                if self.interrupted {
-                    return Vec::new();
-                }
-                let sub = maximal(
-                    vs.iter()
-                        .map(|y| {
-                            let mut p = Tricks::ZERO;
-                            for i in g.iter() {
-                                p.set(i, y.get(map[i]) + bonus);
-                                clamp(&mut p, i);
-                            }
-                            p
-                        })
-                        .collect(),
-                    s.len,
-                    None,
-                );
-                for i in g.iter() {
-                    let most = sub.iter().map(|p| p.get(i)).max().unwrap_or(0);
-                    start.set(i, start.get(i).min(most));
-                }
-                let mut mask = Tricks::ZERO;
-                for i in g.iter() {
-                    mask.set(i, 0xFF);
-                }
-                subs.push((mask, sub));
-            }
+            let Some((start, subs)) = self.subs(b, &st, won, budget) else {
+                return Vec::new();
+            };
             let words = s.len.div_ceil(8);
             let mut acc = vec![start];
             for (mask, sub) in &subs {
@@ -2629,6 +2686,61 @@ impl Solver {
         };
         b.memo.insert((st, won), (budget, out.clone()));
         out
+    }
+
+    /// At a defender's turn in `b`'s search, what its merge starts from
+    /// (per layout, the least over its cards of the most the way on takes)
+    /// and per card a [`Way`]; `None` if interrupted
+    fn subs(
+        &mut self,
+        b: &mut Banded,
+        st: &State,
+        won: u8,
+        budget: u64,
+    ) -> Option<(Tricks, Vec<Way>)> {
+        let s = self.structure(st.live());
+        let c = Self::consistent(st, &s);
+        let band = self.band(b, st, &s, won);
+        let clamp = |v: &mut Tricks, i: usize| {
+            v.set(i, v.get(i).clamp(band.lo.get(i), band.hi.get(i)));
+        };
+        let mut start = Tricks::ZERO;
+        for i in c.iter() {
+            start.set(i, 127);
+        }
+        let mut subs = Vec::new();
+        for (_, g, ch, w) in self.defender_moves(st, &s, c) {
+            let map = self.map(st, &ch);
+            let bonus = u8::from(w);
+            let vs = self.banded(b, ch, won + bonus, budget);
+            if self.interrupted {
+                return None;
+            }
+            let sub = maximal(
+                vs.iter()
+                    .map(|y| {
+                        let mut p = Tricks::ZERO;
+                        for i in g.iter() {
+                            p.set(i, y.get(map[i]) + bonus);
+                            clamp(&mut p, i);
+                        }
+                        p
+                    })
+                    .collect(),
+                s.len,
+                None,
+            );
+            for i in g.iter() {
+                let most = sub.iter().map(|p| p.get(i)).max().unwrap_or(0);
+                start.set(i, start.get(i).min(most));
+            }
+            let mut mask = Tricks::ZERO;
+            for i in g.iter() {
+                mask.set(i, 0xFF);
+            }
+            subs.push((mask, sub));
+        }
+        Some((start, subs))
     }
 
     /// `vs` cut to a [`Cut::Beam`]'s width, those losing least first

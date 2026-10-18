@@ -472,6 +472,21 @@ a second where every line used to be listed; `KQ85 / T73` 0.15 s; `KJ97 /
 53` a cycle in 19 s.  Open: `KJ9753` opposite a void (best found, not
 proven).
 
+`KJ9753` opposite a void settled (2026-10-19): a cycle of nine lines in
+8 s at MP, of six at IMPs.  The best response no longer merges the first
+trick's ways to compare (over 270,000 vectors after two of East's eight
+cards): each lead searches East's cards depth first, a vector of each
+card's way on at a time, and cuts once the gain still possible is no more
+than the best found.  The bound: what the lanes so far gain, less, for
+each card to come, the least any of its vectors lowers the lanes no later
+card touches, memoized by those lanes.  The bound took one lead from 90 s
+unfinished to 0.65 s, dropping the vectors another one covers once capped
+by the lanes so far to 0.17 s, the memo a slow lead at IMPs from 19 s to
+0.22 s.  `KJ97 / 53` now 4 s at MP (was 20.5 s), 11 s at IMPs (was over
+100 s); its cycle has different lines, as the first of equal best
+responses is now kept.  The other 13 comparisons are byte-identical.  A
+cycle shows no line among those found is unbeaten, not that none is.
+
 Per-card values in the explorer (2026-10-19): `Solver::choices` weighs each
 card declarer may play at a position of a line by the same search, rooted
 there, valuing each layout by the whole line's result: on a root layout

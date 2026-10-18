@@ -218,9 +218,10 @@ combinations known, such as `KQ85` opposite `T73` and `KJ9753` opposite a
 void, take under a second per target.  `Solver::compare` proves the best
 line on `KJ9753` opposite the 2 (3,880 undominated lines) in 0.3 s and on
 `KQ85` opposite `T73` in 0.15 s; `KJ97` opposite `53` ends in a cycle of
-lines found after 19 s.  On `KJ9753` opposite a void it shows the best
-line found but cannot prove it: the check's first trick keeps half a
-million ways to compare and does not finish, and the page says so.  The web trainer runs the solver in a worker, so
+lines in 4 s, `KJ9753` opposite a void in a cycle of nine in 8 s.  At the
+first trick, where a defender's cards multiply the ways to compare into
+hundreds of thousands, the check searches them depth first instead, cut
+by a bound on the gain still possible.  The web trainer runs the solver in a worker, so
 the page stays responsive; a random deal is abandoned after two seconds and
 another dealt, and a combination you enter yourself searches ten seconds at a
 time until it finishes or you stop it.  When a search is interrupted its bound comes from

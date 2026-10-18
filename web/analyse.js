@@ -524,8 +524,8 @@ function main() {
   for (const el of document.querySelectorAll('main > .controls input, #constraints input')) {
     el.onkeydown = (event) => { if (event.key === 'Enter') analyse(); };
   }
-  // One state's merge can hold a slice for minutes (every line of KJ9753
-  // opposite a void): past HARD_STOP the worker goes, its memo with it.
+  // One state's merge can hold a slice for long: past HARD_STOP the
+  // worker goes, its memo with it.
   id('cancel').onclick = () => {
     const j = job;
     if (!j?.running) return;
