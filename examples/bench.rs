@@ -7,8 +7,11 @@
 //!
 //! `gen` samples one combination per stratum (missing cards 4..=12, North's
 //! length, missing honours among AKQJ), then appends the known slow cases.
-//! `run` solves every combination for each trick target, one process per
-//! run so a timeout or crash costs only that run.
+//! `run` solves every combination for each trick target, then compares its
+//! lines at matchpoints (`mp`), one process per run so a timeout or crash
+//! costs only that run.  An `mp` row's score is its line count and its
+//! bound the lines in the best mix; its proof is `proven`, `mix` (a mix of
+//! lines proven), `unproven` (a cycle no mix settled) or `interrupted`.
 //! Each run gets the timeout as its engine budget, and is killed at twice
 //! that.  Rows go to stdout as TSV, with `proof` saying how each run ended:
 //! `proven`, `interrupted` (out of budget; `bound` still holds), `timeout`
@@ -19,7 +22,7 @@ use contract_bridge::Holding;
 use std::io::Read;
 use std::process::{Command, Stdio};
 use std::time::{Duration, Instant};
-use suit_combination::{Error, Solver, TOTAL};
+use suit_combination::{Error, Scoring, Solver, TOTAL};
 
 const SLOW: &[&str] = &[
     "A953 KJ8", "KJ84 T63", "KQ85 T73", "KJ85 T63", "KT85 J63", "KJ62 T84", "AQ95 T73", "A862 J94",
@@ -86,22 +89,33 @@ fn generate(seed: u64) {
 fn goals(north: Holding, south: Holding) -> Vec<String> {
     (1..=north.len().max(south.len()))
         .map(|t| format!("t{t}"))
+        .chain(["mp".into()])
         .collect()
 }
 
 /// Solve one run within `budget` and print `score bound states widest ms
 /// vmhwm_kb proof`
 fn one(north: Holding, south: Holding, goal: &str, budget: Option<Duration>) {
-    let target: u8 = goal[1..].parse().expect("target");
     let start = Instant::now();
     let mut solver = Solver::new(north, south).expect("combination");
     if let Some(budget) = budget {
         solver.set_interrupt(move |_| start.elapsed() >= budget);
     }
-    let (score, bound, proof) = match solver.analyze(target) {
-        Ok(a) => (a.score, a.score, "proven"),
-        Err(Error::Interrupted { bound, .. }) => (0, bound, "interrupted"),
-        Err(e) => panic!("{e}"),
+    let (score, bound, proof) = if goal == "mp" {
+        match solver.compare(Scoring::Matchpoints) {
+            Ok(c) if c.open => (c.lines.len() as u64, c.best.len() as u64, "interrupted"),
+            Ok(c) if !c.proven => (c.lines.len() as u64, c.best.len() as u64, "unproven"),
+            Ok(c) if c.best.len() > 1 => (c.lines.len() as u64, c.best.len() as u64, "mix"),
+            Ok(c) => (c.lines.len() as u64, 1, "proven"),
+            Err(Error::Interrupted { .. }) => (0, 0, "interrupted"),
+            Err(e) => panic!("{e}"),
+        }
+    } else {
+        match solver.analyze(goal[1..].parse().expect("target")) {
+            Ok(a) => (a.score, a.score, "proven"),
+            Err(Error::Interrupted { bound, .. }) => (0, bound, "interrupted"),
+            Err(e) => panic!("{e}"),
+        }
     };
     let ms = start.elapsed().as_secs_f64() * 1e3;
     let (states, widest) = solver.stats();
@@ -241,7 +255,7 @@ fn run(corpus: &str, timeout: Duration) {
         .iter()
         .filter(|r| r.status != "ok" || r.ms > 1000.0)
         .map(|r| {
-            let bound = if r.status == "interrupted" {
+            let bound = if r.status == "interrupted" && r.goal != "mp" {
                 format!(" (bound {:.4})", r.bound as f64 / TOTAL as f64)
             } else {
                 String::new()
@@ -254,7 +268,7 @@ fn run(corpus: &str, timeout: Duration) {
         .collect();
     eprintln!(
         "runs {} ok {} interrupted {} timeout {} error {}\n\
-         proof: proven {} interrupted {} timeout {} error {}\n\
+         proof: proven {} mix {} unproven {} interrupted {} timeout {} error {}\n\
          time ms p50 {:.1} p95 {:.1} max {:.1}\n\
          peak memory MB {:.0}\n\
          states max {} widest antichain {}\n\
@@ -265,6 +279,8 @@ fn run(corpus: &str, timeout: Duration) {
         count("timeout"),
         count("error"),
         proof("proven"),
+        proof("mix"),
+        proof("unproven"),
         proof("interrupted"),
         proof("timeout"),
         proof("error"),

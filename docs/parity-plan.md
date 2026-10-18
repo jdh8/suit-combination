@@ -534,9 +534,12 @@ Publish a versioned comparison report: coverage, disagreements, hardware,
 native and browser timings, memory, timeouts, proof rates. Claim a tie only
 for the measured scope.
 
+Done: [report-2026-10-19.md](report-2026-10-19.md).  `bench` now also
+compares lines at matchpoints (`mp` rows).
+
 ## Next step and exclusions
 
-Phase 6: the report.  Phase 5 is done.
+All six phases are done; the [report](report-2026-10-19.md) states what was measured.
 
 Not needed: rewrite, server backend, new framework, GPU search, full-deal AI,
 bidding inference. Mixed-strategy equilibria are a separate research question.
