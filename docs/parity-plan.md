@@ -506,6 +506,28 @@ from over 600 s and 2.2 GB unfinished to about 1 s per line, `KJ97 / 53`
 from 5–27 s to 0.7–2.7 s, inside the explorer's 3 s; values identical on
 the four holdings both finish (three lines each at MP).
 
+Best mixes (2026-10-19, the user's call): where lines beat each other in
+a cycle, the best is a mix of lines no line beats on average, which always
+exists (two lines compared are a symmetric zero-sum game).  `compare` runs
+the single-line check first, so a proven best line is unchanged (11
+comparisons byte-identical); on a cycle it goes on by double oracle: the
+best mix of every line found by a dense simplex in floating point,
+rounded up to whole weights out of 2^28, then the best response to the
+mix (the same search with per-layout values summed over the mix's lines)
+past an allowance of twice the rounding's worst effect, adding the line
+found until none passes it.  `Comparison::mix` and `slack` carry the
+certificate: no line gains more than `slack` over `mix`.  Found:
+`A953 / KJ8` 38/36/26% (0.35 s), `KJ84 / T63` 73/18/8% (0.7 s), `KJ97 /
+53` a third each of three (7 s), `KJ9753` opposite a void a quarter each
+of four (19 s at MP, was a cycle of nine), `Q87 / AT65` five lines.  The
+coarse-oracle test checks the `Q87 / AT65` mix against the engine's full
+front; a mix is rare (one in about 400 random 5-7 card holdings).  An
+interrupted comparison now keeps its lines and its round, and the best
+response its leads searched, so the page's 300 ms slices go on instead of
+starting over: `KJ9753` opposite a void went from 408 s in the browser to
+52 s.  The depth-first search is no longer interrupted (it kept nothing to
+go on with, so a slice shorter than it never finished).
+
 ### 6. The report
 
 Publish a versioned comparison report: coverage, disagreements, hardware,

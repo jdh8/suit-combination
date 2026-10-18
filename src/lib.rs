@@ -286,12 +286,23 @@ pub struct Comparison {
     /// Weight of each of [`Solver::layouts`] that declarer may face: 0 for
     /// the layouts no line plays for
     pub weights: Vec<u64>,
-    /// `[0]`, or, if the lines found beat each other in a cycle, the
-    /// smallest set of them that beat or tie every listed line outside it
-    /// (where `a` beats `b` if [`gain(a, b)`](Self::gain) is more than
-    /// `gain(b, a)`)
+    /// The lines of [`mix`](Self::mix): `[0]` unless lines beat each other
     pub best: Vec<usize>,
-    /// No line at all beats line 0: a search of every line found none
+    /// Weight of each line in the best mix of lines found: `[1, 0, ...]`
+    /// for line 0 alone.  Where lines beat each other in a cycle (`a` beats
+    /// `b` if [`gain(a, b)`](Self::gain) is more than `gain(b, a)`), no
+    /// single line is best, but a mix of them, each played as often as its
+    /// weight, may be one no line beats.
+    pub mix: Vec<u64>,
+    /// A line's gain over the mix: what it wins over each line of it, less
+    /// what it loses, times that line's weight, summed.  [`proven`]: no
+    /// line gains more than this, 0 for line 0 alone, else an allowance
+    /// for the mix's rounding to whole weights.
+    ///
+    /// [`proven`]: Self::proven
+    pub slack: u64,
+    /// No line at all gains more than [`slack`](Self::slack) over the
+    /// mix (for line 0 alone: beats it): a search of every line found none
     pub proven: bool,
     /// That search was interrupted; asking again goes on with it
     pub open: bool,
@@ -308,50 +319,6 @@ impl Comparison {
         (self.weights.iter().zip(x).zip(y))
             .map(|((w, &x), &y)| w * self.payoff[usize::from(x)][usize::from(y)])
             .sum()
-    }
-
-    /// [`best`](Self::best) when nothing is proven
-    fn smith(&self) -> Vec<usize> {
-        let n = self.lines.len();
-        let ge = |a, b| self.gain(a, b) >= self.gain(b, a);
-        // Every best line reaches any line; the last standing beats or ties
-        // those after it, so few lines reach it
-        let c = (1..n).fold(0, |c, x| if ge(c, x) { c } else { x });
-        // The lines reaching `c` (the best among them, as nothing outside
-        // reaches one of them) by "beats or ties"
-        let mut near = vec![c];
-        let mut seen = vec![false; n];
-        seen[c] = true;
-        let mut k = 0;
-        while let Some(&y) = near.get(k) {
-            for (x, seen) in seen.iter_mut().enumerate() {
-                if !*seen && ge(x, y) {
-                    *seen = true;
-                    near.push(x);
-                }
-            }
-            k += 1;
-        }
-        near.sort_unstable();
-        // Those of them reaching every one of them
-        // ponytail: Floyd–Warshall, cubic in the lines reaching `c`: a
-        // hundred or so seen; Tarjan's components if they grow to thousands
-        let m = near.len();
-        let mut reach: Vec<Vec<bool>> = (0..m)
-            .map(|a| (0..m).map(|b| ge(near[a], near[b])).collect())
-            .collect();
-        for k in 0..m {
-            let via = reach[k].clone();
-            for row in reach.iter_mut().filter(|row| row[k]) {
-                for (r, &v) in row.iter_mut().zip(&via) {
-                    *r |= v;
-                }
-            }
-        }
-        (0..m)
-            .filter(|&a| reach[a].iter().all(|&r| r))
-            .map(|a| near[a])
-            .collect()
     }
 }
 
@@ -731,6 +698,73 @@ fn maximal_sets(mut vs: Vec<Set>, len: usize, branch: Option<&Set>) -> Vec<Set> 
     vs.sort_unstable_by_key(|v| v.order());
     vs.dedup();
     undominated(vs.iter(), len, branch)
+}
+
+/// A mix of the strategies of a symmetric zero-sum game (`a[i][j]`: what
+/// `i` wins over `j`, which is `-a[j][i]`) that no strategy beats:
+/// probabilities summing to 1, by the simplex method in floating point.
+/// Shifted positive, the game has a positive value for the column player,
+/// who maximizes `Σ y` over `(a + shift) y ≤ 1`, `y ≥ 0`; then no row gains
+/// over `y / Σ y`, and as `a` is antisymmetric, no column either.
+// ponytail: dense tableau, Dantzig's rule; Bland's after 10n pivots
+// against cycling.  Hundreds of lines take milliseconds.
+fn equilibrium(a: &[Vec<i64>]) -> Vec<f64> {
+    const EPS: f64 = 1e-12;
+    let n = a.len();
+    let shift = a.iter().flatten().map(|x| x.abs()).max().unwrap_or(0) + 1;
+    let w = 2 * n + 1;
+    let mut t = vec![0.0; (n + 1) * w];
+    for (i, row) in a.iter().enumerate() {
+        for (j, &x) in row.iter().enumerate() {
+            t[i * w + j] = (x + shift) as f64 / shift as f64;
+        }
+        t[i * w + n + i] = 1.0;
+        t[i * w + 2 * n] = 1.0;
+    }
+    for j in 0..n {
+        t[n * w + j] = -1.0;
+    }
+    let mut basis: Vec<usize> = (n..2 * n).collect();
+    for pivots in 0.. {
+        let cost = &t[n * w..n * w + 2 * n];
+        let entering = if pivots < 10 * n {
+            (0..2 * n)
+                .filter(|&j| cost[j] < -EPS)
+                .min_by(|&x, &y| cost[x].total_cmp(&cost[y]))
+        } else {
+            (0..2 * n).find(|&j| cost[j] < -EPS)
+        };
+        let Some(e) = entering else { break };
+        let ratio = |i: usize| t[i * w + 2 * n] / t[i * w + e];
+        let l = (0..n)
+            .filter(|&i| t[i * w + e] > EPS)
+            .min_by(|&x, &y| ratio(x).total_cmp(&ratio(y)).then(basis[x].cmp(&basis[y])))
+            .expect("bounded: every column is positive");
+        let p = t[l * w + e];
+        for x in &mut t[l * w..(l + 1) * w] {
+            *x /= p;
+        }
+        let pivot_row = t[l * w..(l + 1) * w].to_vec();
+        for i in (0..=n).filter(|&i| i != l) {
+            let f = t[i * w + e];
+            if f != 0.0 {
+                for (x, &y) in t[i * w..(i + 1) * w].iter_mut().zip(&pivot_row) {
+                    *x -= f * y;
+                }
+            }
+        }
+        basis[l] = e;
+    }
+    let mut y = vec![0.0; n];
+    for (i, &b) in basis.iter().enumerate() {
+        if b < n {
+            y[b] = t[i * w + 2 * n];
+        }
+    }
+    let sum: f64 = y.iter().sum();
+    y.iter()
+        .map(|&y| if y / sum < EPS { 0.0 } else { y / sum })
+        .collect()
 }
 
 const NORTH: u8 = 0;
@@ -1125,8 +1159,8 @@ type Way = (Tricks, Vec<Tricks>);
 
 /// A search of lines by how they compare with a line
 struct Banded {
-    scoring: Scoring,
-    line: Tricks,
+    /// The lines compared with, each by its weight
+    against: (Scoring, Vec<(i64, Tricks)>),
     /// What a vector may lose, against double dummy, and still gain enough
     budget: u64,
     /// Per root layout, the tricks at and below which, and at and above
@@ -1141,19 +1175,23 @@ struct Banded {
     bands: FxMap<(u16, u8), Rc<Band>>,
     /// Vectors losing at most the budget kept with them, and maybe others
     memo: FxMap<(State, u8), (u64, Vec<Tricks>)>,
+    /// [`Solver::beater`]'s first moves searched, the best gain so far and
+    /// its line, to go on with
+    leads: (usize, i64, Option<(usize, Tricks)>),
 }
 
 impl Banded {
     /// A search from a state of structure `live` worth `value[i][x]` on
     /// each layout `i` there of `mass` deals, taking `x` tricks in all
     /// (nondecreasing in `x`); no line takes more than `most(i)`.  A layout
-    /// of no deals is left out.  `scoring`, `line` and `budget` name it.
+    /// of no deals is left out.  The lines compared with and `budget` name
+    /// it.
     fn new(
         value: &[Vec<i64>],
         mass: &[u64],
         most: impl Fn(usize) -> u8,
         live: u16,
-        (scoring, line, budget): (Scoring, Tricks, u64),
+        (against, budget): ((Scoring, Vec<(i64, Tricks)>), u64),
     ) -> Self {
         let (mut lo, mut hi, mut loss) = (Vec::new(), Vec::new(), Vec::new());
         for (i, v) in value.iter().enumerate() {
@@ -1185,8 +1223,7 @@ impl Banded {
             );
         }
         Self {
-            scoring,
-            line,
+            against,
             budget,
             lo,
             hi,
@@ -1194,6 +1231,7 @@ impl Banded {
             live,
             bands: FxMap::default(),
             memo: FxMap::default(),
+            leads: (0, i64::MIN, None),
         }
     }
 }
@@ -1240,6 +1278,30 @@ pub struct Solver {
     dd: Option<Rc<[u8]>>,
     /// The last search for lines beating a line, kept to go on with
     banded: Option<Banded>,
+    /// An interrupted comparison, to go on with
+    progress: Option<Progress>,
+}
+
+/// Where [`Solver::compare`] stands
+#[derive(Clone)]
+struct Progress {
+    scoring: Scoring,
+    /// Lines found: (first move, tricks per layout, plan once built)
+    found: Vec<(usize, Tricks, Option<Plan>)>,
+    /// The best line of each round, each beating the one before
+    tops: Vec<usize>,
+    /// No line beats the last of `tops`, or the mix
+    proven: bool,
+    /// Lines beat each other: the best is a mix
+    mixed: bool,
+    /// Once mixed, what each line found gains over each
+    a: Vec<Vec<i64>>,
+    /// The best mix of the lines found, by weight
+    mix: Vec<u64>,
+    /// Lines found beating a mix
+    rounds: usize,
+    /// Nothing more to search, proven or not
+    done: bool,
 }
 
 /// Memo misses between polls of [`Solver::set_interrupt`]'s callback
@@ -1294,6 +1356,7 @@ impl Solver {
             interrupted: false,
             dd: None,
             banded: None,
+            progress: None,
         };
         let root = solver.root();
         // The root has the most live cards, so the finest layout space
@@ -1618,76 +1681,170 @@ impl Solver {
                 .sum()
         };
         let moves = self.declarer_moves(&root, &s);
-        // (first move, tricks per layout, plan once built)
-        let mut found: Vec<(usize, Tricks, Option<Plan>)> = Vec::new();
-        for (k, &(ch, _, _)) in moves.iter().enumerate() {
-            let (vs, _) = self.feasible(ch, Cut::Beam(BEAM));
-            if self.interrupted {
-                return Err(Error::Interrupted {
-                    bound: self.total(),
-                    total: self.total(),
-                });
+        let mut p = match self.progress.take() {
+            Some(p) if p.scoring == scoring => p,
+            _ => {
+                let mut found = Vec::new();
+                for (k, &(ch, _, _)) in moves.iter().enumerate() {
+                    let (vs, _) = self.feasible(ch, Cut::Beam(BEAM));
+                    if self.interrupted {
+                        return Err(Error::Interrupted {
+                            bound: self.total(),
+                            total: self.total(),
+                        });
+                    }
+                    found.extend(vs.into_iter().map(|v| (k, v, None)));
+                }
+                let top = (0..found.len())
+                    .max_by_key(|&a| {
+                        let wins = found.iter().filter(|b| net(&found[a].1, &b.1) >= 0);
+                        (wins.count(), std::cmp::Reverse(a))
+                    })
+                    .ok_or(Error::BadTarget)?;
+                Progress {
+                    scoring,
+                    found,
+                    tops: vec![top],
+                    proven: false,
+                    mixed: false,
+                    a: Vec::new(),
+                    mix: Vec::new(),
+                    rounds: 0,
+                    done: false,
+                }
             }
-            found.extend(vs.into_iter().map(|v| (k, v, None)));
-        }
-        let mut top = (0..found.len())
-            .max_by_key(|&a| {
-                let wins = found.iter().filter(|b| net(&found[a].1, &b.1) >= 0);
-                (wins.count(), std::cmp::Reverse(a))
-            })
-            .ok_or(Error::BadTarget)?;
-        let (mut proven, mut open) = (false, false);
-        let mut tops = vec![top];
-        for _ in 0..ROUNDS {
-            let Ok(beater) = self.beater(scoring, found[top].1) else {
+        };
+        let mut open = false;
+        while !p.done && !p.mixed {
+            let top = *p.tops.last().expect("a line to start from");
+            let Ok(better) = self.better(scoring, &[(1, p.found[top].1)], 0, &moves) else {
                 open = true;
                 break;
             };
-            let Some((k, z)) = beater else {
-                proven = true;
+            let Some((k, v, plan)) = better else {
+                (p.proven, p.done) = (true, true);
                 break;
             };
-            let (ch, at, cards) = moves[k];
-            let mut b = self.banded.take();
-            let (then, v) = self.realize(b.as_mut(), ch, 0, z);
-            self.banded = b;
-            if self.interrupted {
-                open = true;
-                break;
-            }
-            let plan = Self::declarer_step(at, cards, then);
-            top = match found.iter().position(|f| f.1 == v) {
+            let top = match p.found.iter().position(|f| f.1 == v) {
                 Some(i) => i,
                 None => {
-                    found.push((k, v, Some(plan)));
-                    found.len() - 1
+                    p.found.push((k, v, Some(plan)));
+                    p.found.len() - 1
                 }
             };
-            if tops.contains(&top) {
+            // Lines beating each other in a cycle, or a cycle longer than this
+            p.mixed = p.tops.contains(&top) || p.tops.len() > ROUNDS;
+            if !p.mixed {
+                p.tops.push(top);
+            }
+        }
+        let max = self.max_tricks();
+        // Lines beating each other: the best is a mix of them, by double
+        // oracle.  The best mix of the lines found, then a line beating
+        // it, until none does.
+        // ponytail: a mix still beaten after this many lines is left
+        // unproven
+        const MIX_ROUNDS: usize = 32;
+        // Weights of a mix in all, for the search's whole numbers
+        const SCALE: f64 = (1u64 << 28) as f64;
+        let round = |a: &[Vec<i64>]| -> Vec<u64> {
+            let p = equilibrium(a);
+            let mut w: Vec<u64> = p.iter().map(|&p| (p * SCALE).ceil() as u64).collect();
+            if w.iter().filter(|&&w| w > 0).count() == 1 {
+                w.iter_mut().for_each(|w| *w = u64::from(*w > 0));
+            }
+            w
+        };
+        if p.mixed && p.a.is_empty() {
+            p.a = (p.found.iter())
+                .map(|x| p.found.iter().map(|y| net(&x.1, &y.1)).collect())
+                .collect();
+            p.mix = round(&p.a);
+        }
+        let most = (0..=max).map(|x| scoring.net(x, 0)).max().unwrap_or(0);
+        let total = weights.iter().sum::<u64>() as i64;
+        let mut slack = 0;
+        while p.mixed && !p.done && !open {
+            let against: Vec<(i64, Tricks)> = (p.mix.iter().zip(&p.found))
+                .filter(|&(&w, _)| w > 0)
+                .map(|(&w, f)| (w as i64, f.1))
+                .collect();
+            // Rounding up moves the mix's gain against a line by less than
+            // a weight per line of it, times the most a line gains against
+            // one: allow twice that, for the simplex's error.
+            let floor = match against.len() {
+                1 => 0,
+                n => 2 * n as i64 * total * most,
+            };
+            slack = floor as u64;
+            if p.rounds == MIX_ROUNDS {
+                p.done = true;
                 break;
             }
-            tops.push(top);
+            let Ok(better) = self.better(scoring, &against, floor, &moves) else {
+                open = true;
+                break;
+            };
+            let Some((k, v, plan)) = better else {
+                (p.proven, p.done) = (true, true);
+                break;
+            };
+            if p.found.iter().any(|f| f.1 == v) {
+                p.done = true;
+                break;
+            }
+            for (row, f) in p.a.iter_mut().zip(&p.found) {
+                row.push(net(&f.1, &v));
+            }
+            p.a.push(p.found.iter().map(|f| net(&v, &f.1)).chain([0]).collect());
+            p.found.push((k, v, Some(plan)));
+            p.mix = round(&p.a);
+            p.rounds += 1;
         }
+        if open {
+            self.progress = Some(p.clone());
+        }
+        let Progress {
+            mut found,
+            tops,
+            proven,
+            mix,
+            ..
+        } = p;
+        let top = *tops.last().expect("a line to start from");
         // The narrow search's lines are memoized: planning them needs no budget.
         self.armed = false;
         self.interrupted = false;
-        // The best, any line it was beaten by, and the best of each other
-        // first card against it
-        let mut shown = vec![top];
-        shown.extend(tops.iter().filter(|&&t| t != top));
+        // The best line, or the lines of the best mix, most likely first;
+        // any line the best was beaten by before a mix; then the best of
+        // each other first card against the first
+        let mut shown: Vec<usize> = if mix.is_empty() {
+            let mut shown = vec![top];
+            shown.extend(tops.iter().filter(|&&t| t != top));
+            shown
+        } else {
+            let mut shown: Vec<usize> = (0..found.len()).filter(|&i| mix[i] > 0).collect();
+            shown.sort_by_key(|&i| std::cmp::Reverse(mix[i]));
+            shown
+        };
+        let first = shown[0];
+        let kept = shown.len();
         for k in 0..moves.len() {
             if shown.iter().any(|&i| found[i].0 == k) {
                 continue;
             }
             let with = (0..found.len()).filter(|&i| found[i].0 == k);
-            if let Some(i) = with.max_by_key(|&i| net(&found[i].1, &found[top].1)) {
+            if let Some(i) = with.max_by_key(|&i| net(&found[i].1, &found[first].1)) {
                 shown.push(i);
             }
         }
-        shown[1..].sort_by_key(|&i| std::cmp::Reverse(net(&found[i].1, &found[top].1)));
-        let max = self.max_tricks();
+        let rest = if mix.is_empty() { 1 } else { kept };
+        shown[rest..].sort_by_key(|&i| std::cmp::Reverse(net(&found[i].1, &found[first].1)));
+        let mix: Vec<u64> = (shown.iter().enumerate())
+            .map(|(n, &i)| mix.get(i).copied().unwrap_or(u64::from(n == 0)))
+            .collect();
         let mut lines = Vec::new();
-        for i in shown {
+        for &i in &shown {
             let (k, v, plan) = &mut found[i];
             let (ch, at, cards) = moves[*k];
             let (plan, v) = match plan.take() {
@@ -1709,22 +1866,43 @@ impl Solver {
                 plan,
             });
         }
-        let mut cmp = Comparison {
+        Ok(Comparison {
             scoring,
             lines,
             payoff: (0..=max)
                 .map(|x| (0..=max).map(|y| scoring.gain(x, y)).collect())
                 .collect(),
             weights,
-            best: vec![0],
+            best: (0..mix.len()).filter(|&i| mix[i] > 0).collect(),
+            mix,
+            slack,
             proven,
             open,
             total: s.weight.iter().sum(),
+        })
+    }
+
+    /// A line gaining more than `floor` over `against`, as
+    /// [`beater`](Self::beater) finds it: its first move among `moves`,
+    /// tricks per root layout and plan; `Err` if interrupted
+    fn better(
+        &mut self,
+        scoring: Scoring,
+        against: &[(i64, Tricks)],
+        floor: i64,
+        moves: &[(State, u8, u16)],
+    ) -> Result<Option<(usize, Tricks, Plan)>, ()> {
+        let Some((k, z)) = self.beater(scoring, against, floor)? else {
+            return Ok(None);
         };
-        if !proven && !open {
-            cmp.best = cmp.smith();
+        let (ch, at, cards) = moves[k];
+        let mut b = self.banded.take();
+        let (then, v) = self.realize(b.as_mut(), ch, 0, z);
+        self.banded = b;
+        if self.interrupted {
+            return Err(());
         }
-        Ok(cmp)
+        Ok(Some((k, v, Self::declarer_step(at, cards, then))))
     }
 
     /// Every card declarer may play once `plays` (each card in order, `None`
@@ -1792,7 +1970,13 @@ impl Solver {
             .collect();
         self.armed = self.interrupt.is_some();
         self.misses = 0;
-        let mut b = Banded::new(&value, &mass, |_| most, st.live(), (scoring, line, 0));
+        let mut b = Banded::new(
+            &value,
+            &mass,
+            |_| most,
+            st.live(),
+            ((scoring, vec![(1, line)]), 0),
+        );
         let mut choices = Vec::new();
         for (&(ch, at, cards), &found) in moves.iter().zip(&found) {
             let mut best = found;
@@ -1952,54 +2136,70 @@ impl Solver {
         }
     }
 
-    /// The first move and the way of comparing with `line` (tricks per root
-    /// layout, clamped as [`banded`](Self::banded) does) of the lines
-    /// beating it by most under `scoring`, if any does; `Err` if
-    /// interrupted.  The search is kept in [`banded`](Self::banded), to go
-    /// on with if asked again and for [`realize`](Self::realize).
-    fn beater(&mut self, scoring: Scoring, line: Tricks) -> Result<Option<(usize, Tricks)>, ()> {
+    /// The first move and the way of comparing (tricks per root layout,
+    /// clamped as [`banded`](Self::banded) does) of the line gaining most
+    /// over `against` (lines, each by its weight) under `scoring`, if it
+    /// gains more than `floor`; `Err` if interrupted.  The search is kept in
+    /// [`banded`](Self::banded), to go on with if asked again and for
+    /// [`realize`](Self::realize).
+    fn beater(
+        &mut self,
+        scoring: Scoring,
+        against: &[(i64, Tricks)],
+        floor: i64,
+    ) -> Result<Option<(usize, Tricks)>, ()> {
         let root = self.root();
         let s = self.structure(root.live());
         let c = Self::consistent(&root, &s);
         let max = self.max_tricks();
-        // No line takes more on a layout than double dummy.
-        let dd = self.double_dummy();
-        let most = |r: usize| dd[r].min(max);
-        let top: i64 = c
-            .iter()
-            .map(|r| s.weight[r] as i64 * scoring.net(most(r), line.get(r)))
-            .sum();
-        if top <= 0 {
-            return Ok(None);
-        }
-        let budget = (top - 1) as u64;
         // Per layout and tricks, what the layout adds to the gain
         let value: Vec<Vec<i64>> = (0..s.len)
             .map(|r| {
                 let w = if c.contains(r) { s.weight[r] as i64 } else { 0 };
-                (0..=max).map(|x| w * scoring.net(x, line.get(r))).collect()
+                (0..=max)
+                    .map(|x| {
+                        let net = against.iter().map(|&(p, l)| p * scoring.net(x, l.get(r)));
+                        w * net.sum::<i64>()
+                    })
+                    .collect()
             })
             .collect();
+        // No line takes more on a layout than double dummy.
+        let dd = self.double_dummy();
+        let most = |r: usize| dd[r].min(max);
+        let top: i64 = c.iter().map(|r| value[r][usize::from(most(r))]).sum();
+        if top <= floor {
+            return Ok(None);
+        }
+        let budget = (top - floor - 1) as u64;
         let mut b = match self.banded.take() {
-            Some(b) if b.scoring == scoring && b.line == line && b.budget == budget => b,
+            Some(b) if b.against.0 == scoring && b.against.1 == against && b.budget == budget => b,
             _ => {
                 let mass: Vec<u64> = (0..s.len)
                     .map(|r| if c.contains(r) { s.weight[r] } else { 0 })
                     .collect();
-                Banded::new(&value, &mass, most, root.live(), (scoring, line, budget))
+                let key = ((scoring, against.to_vec()), budget);
+                Banded::new(&value, &mass, most, root.live(), key)
             }
         };
         // A lead keeps the root's layouts: its search is the root's.
-        let mut best = None;
-        let mut floor = 0;
-        for (k, (ch, _, _)) in self.declarer_moves(&root, &s).into_iter().enumerate() {
-            if let Some(z) = self.deepest_from(&mut b, ch, 0, budget, &value, &mut floor) {
-                best = Some((k, z));
-            }
+        if b.leads.0 == 0 {
+            b.leads = (0, floor, None);
+        }
+        let moves = self.declarer_moves(&root, &s);
+        while let Some(&(ch, _, _)) = moves.get(b.leads.0) {
+            let mut floor = b.leads.1;
+            let z = self.deepest_from(&mut b, ch, 0, budget, &value, &mut floor);
             if self.interrupted {
                 break;
             }
+            if let Some(z) = z {
+                b.leads.2 = Some((b.leads.0, z));
+            }
+            b.leads.0 += 1;
+            b.leads.1 = floor;
         }
+        let best = b.leads.2;
         self.banded = Some(b);
         if self.interrupted {
             return Err(());
@@ -2080,9 +2280,9 @@ impl Solver {
             *found = Some(x);
             return;
         };
-        if self.tick() {
-            return;
-        }
+        // ponytail: not interrupted, as it keeps nothing to go on with:
+        // 0.6 s at most on KJ9753 opposite a void, past its ways on, which
+        // are; keep the stack of `next`s if that grows
         // Each card to come lowers its own lanes by at least its least
         // drop there, and no two cards own a lane.
         // The least drop depends on `x` only on the lanes owned.
@@ -2116,7 +2316,7 @@ impl Solver {
             .collect();
         next.sort_by_key(|n| std::cmp::Reverse(n.0));
         for (g, z) in next {
-            if g <= *floor || self.interrupted {
+            if g <= *floor {
                 break;
             }
             self.deepest(rest, &own[1..], z, len, value, floor, found, drops);
@@ -3392,7 +3592,7 @@ mod tests {
                         if choice.line {
                             assert!(choice.net >= 0, "{n} / {s}: the line's own card");
                         }
-                        if cmp.proven {
+                        if cmp.proven && cmp.best == [0] {
                             assert!(choice.net <= 0, "{n} / {s}: nothing beats the best");
                         }
                         checked += 1;
@@ -3426,6 +3626,25 @@ mod tests {
                     .collect()
             })
             .collect()
+    }
+
+    #[test]
+    fn equilibria() {
+        let near = |p: Vec<f64>, q: &[f64]| p.iter().zip(q).all(|(p, q)| (p - q).abs() < 1e-9);
+        // Rock, paper, scissors
+        let rps = [vec![0, -1, 1], vec![1, 0, -1], vec![-1, 1, 0]];
+        assert!(near(equilibrium(&rps), &[1.0 / 3.0; 3]));
+        // A strategy beating every other
+        assert!(near(equilibrium(&[vec![0, -2], vec![2, 0]]), &[0.0, 1.0]));
+        // Rock, paper, scissors, and a fourth losing to all but scissors
+        let r = [
+            vec![0, -1, 2, 1],
+            vec![1, 0, -1, 1],
+            vec![-2, 1, 0, -1],
+            vec![-1, -1, 1, 0],
+        ];
+        let p = equilibrium(&r);
+        assert!((0..4).all(|j| (0..4).map(|i| p[i] * r[i][j] as f64).sum::<f64>() > -1e-9));
     }
 
     #[test]

@@ -84,8 +84,14 @@ fewer, as many or more tricks than the line checked (at IMPs, where the
 IMPs change), and drops any line that cannot beat it even taking
 double-dummy tricks everywhere else.  An interrupted check leaves the
 comparison `open`; asking again goes on.  Preference can go round in a
-cycle (`AJ98 / K32` at matchpoints): `best` then lists the lines found
-that beat each other.  `Solver::choices` weighs every card declarer may
+cycle (`AJ98 / K32` at matchpoints), and then no single line is best but
+a mix of lines, each played as often as its weight in `mix`, that no line
+beats on average: such a mix always exists, as comparing two lines is a
+symmetric zero-sum game.  It is found by double oracle: the best mix of
+the lines found (a small linear program), then the same check against the
+mix, adding what beats it, until nothing does.  `best` lists the mix's
+lines; `proven` says no line gains more than `slack` over it, an
+allowance for rounding its weights to whole numbers.  `Solver::choices` weighs every card declarer may
 play at a position of a line, as a chess engine's analysis board weighs
 moves: the line with that card and the best way on from it in place of its
 own, against the line, out of every deal, the defenders still playing as
@@ -217,8 +223,9 @@ vector that already loses more deals than that line.  The hardest
 combinations known, such as `KQ85` opposite `T73` and `KJ9753` opposite a
 void, take under a second per target.  `Solver::compare` proves the best
 line on `KJ9753` opposite the 2 (3,880 undominated lines) in 0.3 s and on
-`KQ85` opposite `T73` in 0.15 s; `KJ97` opposite `53` ends in a cycle of
-lines in 4 s, `KJ9753` opposite a void in a cycle of nine in 8 s.  At the
+`KQ85` opposite `T73` in 0.15 s; on `KJ97` opposite `53` the best is a
+mix of three lines, a third each, proven in 7 s, on `KJ9753` opposite a
+void a mix of four, a quarter each, in 19 s.  At the
 first trick, where a defender's cards multiply the ways to compare into
 hundreds of thousands, the check searches them depth first instead, cut
 by a bound on the gain still possible.  The web trainer runs the solver in a worker, so

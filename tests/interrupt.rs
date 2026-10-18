@@ -5,7 +5,7 @@
 use contract_bridge::Holding;
 use std::sync::Mutex;
 use std::sync::atomic::{AtomicUsize, Ordering};
-use suit_combination::{Analysis, Error, Solver};
+use suit_combination::{Analysis, Error, Scoring, Solver};
 
 fn holding(s: &str) -> Holding {
     if s == "-" {
@@ -234,6 +234,41 @@ fn short_budgets_still_finish() {
             };
             assert_eq!(a, best, "{n} {s} {goal:?}");
         }
+    });
+}
+
+#[test]
+#[cfg_attr(debug_assertions, ignore = "slow unoptimized: run with --release")]
+fn short_compares_still_finish() {
+    // A comparison stopped every few hundred states goes on where it
+    // stopped, through single lines and mixes, to the fresh answer.
+    let combos = [
+        ("A953", "KJ8"),
+        ("KJ84", "T63"),
+        ("Q87", "AT65"),
+        ("KJ9753", "2"),
+    ];
+    par_map(&combos, |&(n, s)| {
+        let (n, s) = (holding(n), holding(s));
+        let best = Solver::new(n, s)
+            .unwrap()
+            .compare(Scoring::Matchpoints)
+            .unwrap();
+        let mut solver = Solver::new(n, s).unwrap();
+        solver.set_poll_interval(64);
+        let mut calls = 0;
+        let c = loop {
+            stop_at(&mut solver, 4);
+            calls += 1;
+            assert!(calls < 100_000, "{n} {s} makes no progress");
+            match solver.compare(Scoring::Matchpoints) {
+                Ok(c) if !c.open => break c,
+                Ok(_) | Err(Error::Interrupted { .. }) => {}
+                Err(e) => panic!("{e}"),
+            }
+        };
+        assert!(calls > 10, "{n} {s}: only {calls} calls");
+        assert_eq!(c, best, "{n} {s}");
     });
 }
 

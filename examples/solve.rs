@@ -6,7 +6,7 @@
 //!
 //! Prints the value of every goal (or just the one given) with its status,
 //! and the line for the goal shown last.  `mp` and `imps` compare every
-//! line, the latter in CONTRACT (e.g. `3N`, `--vulnerable` or not) made
+//! line (or the best mix of lines, if they beat each other in a cycle), the latter in CONTRACT (e.g. `3N`, `--vulnerable` or not) made
 //! with NEED tricks in this suit.  `--budget` gives each goal at most
 //! that many seconds; a goal out of time shows only its bound.  `--vacant`
 //! sets the defenders' vacant places, `--east` and `--west` the cards known
@@ -71,11 +71,22 @@ fn compared(c: &Comparison) {
             );
         }
     }
-    match (c.proven, c.open, &c.best[..]) {
-        (true, _, _) => println!("best: line 0, and no line beats it"),
-        (_, true, _) => println!("best found: line 0; interrupted before any proof"),
-        (_, _, [_]) => println!("best found: line 0; unproven"),
-        (_, _, best) => println!("no single best line: {best:?} beat each other in a cycle"),
+    let sum: u64 = c.mix.iter().sum();
+    let mix: Vec<String> = (c.best.iter())
+        .map(|&i| format!("{i} ({:.2}%)", c.mix[i] as f64 / sum as f64 * 100.0))
+        .collect();
+    let mix = mix.join(", ");
+    let slack = per(c.slack) / sum as f64 * scale;
+    match (c.proven, c.open, c.best.len()) {
+        (true, _, 1) => println!("best: line 0, and no line beats it"),
+        (true, _, _) => println!(
+            "no single best line; best: a mix of lines {mix}, and no line gains more than \
+             {slack:.2e} {unit} over it"
+        ),
+        (_, true, 1) => println!("best found: line 0; interrupted before any proof"),
+        (_, true, _) => println!("best mix found: lines {mix}; interrupted before any proof"),
+        (_, _, 1) => println!("best found: line 0; unproven"),
+        (_, _, _) => println!("best mix found: lines {mix}; unproven"),
     }
     println!("{}", c.lines[0].plan);
 }

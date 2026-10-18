@@ -1103,9 +1103,12 @@ fn coarse_oracle_agrees_on_line_comparisons() {
     // trick more on West 9QJ in 32 / KT864, a line no class-blind strategy
     // has (the full front has 59 such vectors to the engine's 58)
     let mut fails = Vec::new();
+    let mut mixes = 0;
     for (n, s) in random_combos(80, 3, 6, 0x9E37_79B9_7F4A_7C15)
         .into_iter()
         .chain([(holding("32"), holding("KT864"))])
+        // Lines beating each other in a cycle at MP: a mix of five is best
+        .chain([(holding("Q87"), holding("AT65"))])
     {
         let missing = DECK & !n.to_bits() & !s.to_bits();
         let mut coarse = Coarse {
@@ -1180,13 +1183,6 @@ fn coarse_oracle_agrees_on_line_comparisons() {
                 let mut it = front.iter().filter(|v| dist(v) == *d);
                 it.next().filter(|_| it.next().is_none())
             };
-            let net = |a: &Vector, b: &Vector| -> i64 {
-                (0..a.len())
-                    .map(|i| {
-                        weights[i] as i64 * (gain(a[i], b[i]) as i64 - gain(b[i], a[i]) as i64)
-                    })
-                    .sum()
-            };
             let c = solver.compare(scoring).unwrap();
             // Lines found but off the front may share a distribution with
             // a line on it
@@ -1194,17 +1190,35 @@ fn coarse_oracle_agrees_on_line_comparisons() {
             let find = |l: &suit_combination::Line| {
                 find(&l.tricks).filter(|_| every.contains(&l.guarantee))
             };
-            let Some(best) = find(&c.lines[0]) else {
-                continue;
+            // Proven: no line on the full front, as checked above, beats
+            // the best, or gains more than the slack over the best mix;
+            // else some line does
+            let over = |g: &Vec<u8>| -> i64 {
+                (c.best.iter())
+                    .map(|&i| {
+                        let l = &c.lines[i].guarantee;
+                        let net: i64 = (0..g.len())
+                            .map(|r| {
+                                let (x, y) = (usize::from(g[r]), usize::from(l[r]));
+                                c.weights[r] as i64
+                                    * (c.payoff[x][y] as i64 - c.payoff[y][x] as i64)
+                            })
+                            .sum();
+                        c.mix[i] as i64 * net
+                    })
+                    .sum()
             };
-            // Proven: no line beats it; else some line beats each found
-            let beaten = front.iter().any(|v| net(v, best) > 0);
+            let beaten = every.iter().any(|g| over(g) > c.slack as i64);
+            mixes += usize::from(c.proven && c.best.len() > 1);
             if c.proven == beaten || c.open {
                 fails.push(format!(
                     "{name}: proven {} open {}, beaten {beaten}",
                     c.proven, c.open
                 ));
             }
+            let Some(best) = find(&c.lines[0]) else {
+                continue;
+            };
             for (a, la) in c.lines.iter().enumerate() {
                 let Some(va) = find(la) else {
                     continue;
@@ -1221,6 +1235,7 @@ fn coarse_oracle_agrees_on_line_comparisons() {
             }
         }
     }
+    assert!(mixes > 0, "no best mix checked");
     assert!(
         fails.is_empty(),
         "

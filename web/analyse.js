@@ -160,7 +160,7 @@ function goalStatus(j, key) {
   const r = j.results.get(key);
   const bound = key !== 'cmp' && r?.interrupted && r.bound !== undefined ? ` (≤ ${value(r.bound, total(j))})` : '';
   if (r?.error) return `${label(key)}: ${r.error}`;
-  if (finished(r)) return key === 'cmp' ? (r.proven ? 'Best line' : r.open ? 'Best line so far' : 'Best line found') : `${label(key)} ${value(r.score, r.total)}`;
+  if (finished(r)) return key === 'cmp' ? `Best ${r.best.length > 1 ? 'mix' : 'line'}${r.proven ? '' : r.open ? ' so far' : ' found'}` : `${label(key)} ${value(r.score, r.total)}`;
   if (j.current === key && j.running) return `${label(key)} solving…${bound}`;
   if (r?.memory) return `${label(key)} out of memory${bound}`;
   if (r?.interrupted) return `${label(key)} interrupted${bound}`;
@@ -381,16 +381,26 @@ function linesView(j) {
   const gain = (w) => (imps ? `${(w / t).toFixed(3)}` : pct(w, t));
   const ks = Array.from({ length: j.max }, (_, i) => i + 1);
   const atLeast = (l, k) => l.tricks.slice(k).reduce((s, w) => s + w, 0);
+  // A mix plays each of its lines as often as its weight
+  const mixed = cmp.best.length > 1;
+  const weight = cmp.mix.reduce((s, w) => s + w, 0);
+  const often = (i) => pct(cmp.mix[i], weight);
   const rows = cmp.lines.map((l, i) => `<tr data-line="${i}" class="${i === a ? 'chosen' : ''}">
-      <td>${cmp.best.includes(i) ? '★' : ''}</td><td>${i}</td><td>${l.seat[0]} ${cardsText(l.cards)}</td>
+      <td>${cmp.best.includes(i) ? `★${mixed ? ` ${often(i)}` : ''}` : ''}</td><td>${i}</td><td>${l.seat[0]} ${cardsText(l.cards)}</td>
       ${ks.map((k) => `<td class="num">${pct(atLeast(l, k), t)}</td>`).join('')}
       <td class="num">${i === a ? '' : `+${gain(gainOf(cmp, i, a))} −${gain(gainOf(cmp, a, i))}`}</td>
       <td>${i === a ? '' : `<button class="mini ${i === b ? 'active' : ''}" data-versus="${i}">vs</button>`}</td></tr>`).join('');
   const at = imps ? 'IMPs' : 'matchpoints';
-  const verdict = cmp.proven ? `★ Line 0 is the best at ${at}: no line beats it.`
-    : cmp.best.length > 1 ? `No single best line at ${at}: ★ lines ${cmp.best.join(', ')} beat each other in a cycle.`
+  const mix = `a mix of ★ ${cmp.best.map((i) => `line ${i} ${often(i)}`).join(', ')} of the time`;
+  const tiny = cmp.slack / weight / t;
+  const slack = imps ? tiny.toPrecision(2) : `${(tiny * 100).toPrecision(2)}%`;
+  const verdict = !mixed ? (cmp.proven ? `★ Line 0 is the best at ${at}: no line beats it.`
     : cmp.open ? `★ Line 0 is the best found so far at ${at}; still checking whether any line beats it.`
-    : `★ Line 0 is the best found at ${at}, not proven.`;
+    : `★ Line 0 is the best found at ${at}, not proven.`)
+    : `No single best line at ${at}: lines beat each other in a cycle.  `
+      + (cmp.proven ? `The best is ${mix}: no line gains over it (by more than ${slack} ${imps ? 'IMPs per deal' : 'of deals'}, for rounding).`
+      : cmp.open ? `The best found so far is ${mix}; still checking whether any line gains over it.`
+      : `The best found is ${mix}, not proven.`);
   html += `<p class="${cmp.proven ? 'note' : 'flag'}">${verdict}  The others are the best found with each other first card.  Click a line to see it.</p>
     <div class="scroll"><table class="grid lines"><tr><th></th><th>#</th><th>First</th>${ks.map((k) => `<th class="num">≥${k}</th>`).join('')}<th class="num">vs line ${a}${imps ? ' (IMPs)' : ''}</th><th></th></tr>${rows}</table></div>`;
   const line = cmp.lines[a];
