@@ -72,10 +72,10 @@ function call(op, args = [], budget = undefined, ms = undefined) {
 
 // --- goals and searches -----------------------------------------------------
 
-// Goals by key: `t3` for three tricks, `ev` for expected tricks
-const goalKey = (goal) => (goal.kind === 'tricks' ? `t${goal.target}` : 'ev');
-const goalOf = (key) => (key === 'ev' ? { kind: 'exact_expected' } : { kind: 'tricks', target: Number(key.slice(1)) });
-const goalLabel = (key) => (key === 'ev' ? 'EV' : `≥${key.slice(1)}`);
+// Goals by key: `t3` for three tricks
+const goalKey = (target) => `t${target}`;
+const goalOf = (key) => Number(key.slice(1));
+const goalLabel = (key) => `≥${key.slice(1)}`;
 // An Analysis, not {interrupted, bound}
 const finished = (r) => r !== undefined && !r.interrupted;
 // Searched as far as it can go: finished, or stopped for memory
@@ -83,8 +83,7 @@ const closed = (r) => finished(r) || r?.memory;
 const secs = (ms) => `${(ms / 1000).toFixed(1)} s`;
 
 function solveGoal(key, budget, ms) {
-  const [op, args] = key === 'ev' ? ['expected', []] : ['target', [Number(key.slice(1))]];
-  return call(op, args, budget, ms).then(JSON.parse);
+  return call('target', [goalOf(key)], budget, ms).then(JSON.parse);
 }
 
 // A combination's goals in the order to solve them, the one asked for
@@ -96,7 +95,7 @@ function newSearch(north, south, want, visible) {
     if (pending.size) abort('superseded');
   }
   const targets = Array.from({ length: Math.max(north.length, south.length) }, (_, i) => `t${i + 1}`);
-  const keys = [...new Set([want, ...targets, 'ev'])];
+  const keys = [...new Set([want, ...targets])];
   search = { north, south, want, keys, results: new Map(), warm: new Set(), running: false, stop: false, current: null, since: 0, visible };
   problem = null;
   id('table').innerHTML = '';
@@ -117,10 +116,6 @@ async function load(s) {
   s.warm.clear();
 }
 
-// Expected tricks not asked for wait for the targets, which show sooner (one
-// costly state of the expected-tricks search can hold a slice for seconds)
-const waits = (s, key) => key !== s.want && !key.startsWith('t') && s.keys.some((k) => k.startsWith('t') && !closed(s.results.get(k)) && s.results.has(k));
-
 // Solves the open goals of `s` in slices of SLICE ms, round robin, until
 // all are finished, the goal asked for is finished (after every goal has had
 // a turn), SESSION ms pass, or the user cancels; then, if no game is on yet,
@@ -140,7 +135,6 @@ async function runSearch(s) {
       if (!open.length) break;
       for (const key of open) {
         if (s.stop || performance.now() - s.since >= SESSION) break;
-        if (waits(s, key)) continue;
         s.current = key;
         showSearch();
         const r = await solveGoal(key, SLICE);
@@ -193,15 +187,14 @@ function cancel() {
 function goalStatus(s, key) {
   const r = s.results.get(key);
   const label = `<b>${goalLabel(key)}</b>`;
-  const at = (goal, score) => value(goal, score, TOTAL);
+  const at = (score) => value(score, TOTAL);
   // An interrupted search's bound, if any
-  const bound = r?.interrupted && r.bound !== undefined ? ` (≤ ${at(goalOf(key), r.bound)})` : '';
+  const bound = r?.interrupted && r.bound !== undefined ? ` (≤ ${at(r.bound)})` : '';
   if (s.current === key && s.running) return `${label} solving…${bound}`;
-  if (waits(s, key) && !r) return `${label} waiting for the targets`;
   if (r === undefined) return `${label} waiting`;
   if (r.memory) return `${label} out of memory${bound}`;
   if (r.interrupted) return `${label} interrupted${bound}`;
-  return `${label} ${at(r.goal, r.score)}`;
+  return `${label} ${at(r.score)}`;
 }
 
 // The goals strip, the buttons, and while searching the elapsed time
@@ -230,7 +223,7 @@ async function main() {
   id('cancel').onclick = cancel;
   id('more').onclick = () => search && !search.running && runSearch(search);
   for (const el of ['c-north', 'c-south', 'c-goal']) {
-    id(el).onkeydown = (ev) => { if (ev.key === 'Enter') customProblem(); };
+    id(el).onkeydown = (event) => { if (event.key === 'Enter') customProblem(); };
   }
   newProblem();
 }
@@ -258,13 +251,11 @@ function interesting(a) {
   const scores = a.leads.map((l) => l.score);
   const best = Math.max(...scores) / TOTAL;
   const worst = Math.min(...scores) / TOTAL;
-  if (a.goal.kind === 'tricks') return best >= 0.2 && best <= 0.95 && best - worst >= 0.03;
-  return best - worst >= 0.05; // expected tricks at stake
+  return best >= 0.2 && best <= 0.95 && best - worst >= 0.03;
 }
 
 async function newProblem() {
   const lengths = id('length').value.split(',').map(Number);
-  const kind = id('goalkind').value;
   const started = performance.now();
   const ticker = setInterval(() => info(`Dealing… ${secs(performance.now() - started)}`), 100);
   info('Dealing…');
@@ -275,10 +266,10 @@ async function newProblem() {
       const all = await solveRandom(s);
       if (search !== s) return; // a newer request took over
       if (!all) continue; // too hard to wait for: deal another
-      const goals = all.filter((a) => (kind === 'any' || (a.goal.kind === 'tricks') === (kind === 'tricks')) && interesting(a));
+      const goals = all.filter(interesting);
       if (goals.length === 0) continue;
       const pick = goals[Math.floor(Math.random() * goals.length)];
-      s.want = goalKey(pick.goal);
+      s.want = goalKey(pick.target);
       clearInterval(ticker);
       await setProblem(s, pick);
       return;
@@ -291,7 +282,7 @@ async function newProblem() {
   }
 }
 
-// Every target and expected tricks of a random combination within
+// Every target of a random combination within
 // RANDOM_BUDGET in all, or null if that is not enough
 async function solveRandom(s) {
   const deadline = performance.now() + RANDOM_BUDGET;
@@ -318,19 +309,18 @@ async function solveRandom(s) {
 async function customProblem() {
   const north = normalize(id('c-north').value);
   const south = normalize(id('c-south').value);
-  const goalText = id('c-goal').value.trim().toLowerCase();
-  const wantEV = goalText === '' || goalText.startsWith('e');
-  const target = Number(goalText);
-  if (!wantEV && !(Number.isInteger(target) && target >= 1 && target <= Math.max(north.length, south.length))) {
-    info(`No such goal: ${goalText}`, true);
+  const target = Number(id('c-goal').value.trim());
+  const max = Math.max(north.length, south.length);
+  if (!(Number.isInteger(target) && target >= 1 && target <= max)) {
+    info(`Tricks: a number from 1 to ${max}`, true);
     return;
   }
-  await runSearch(newSearch(north, south, wantEV ? 'ev' : `t${target}`, true));
+  await runSearch(newSearch(north, south, goalKey(target), true));
 }
 
 // Deals the defenders' cards and starts playing for `analysis`
 async function setProblem(s, analysis) {
-  const key = goalKey(analysis.goal);
+  const key = goalKey(analysis.target);
   await load(s);
   // A cancel may have replaced the worker since: solve the goal again for play.
   if (!s.warm.has(key)) {
@@ -342,8 +332,7 @@ async function setProblem(s, analysis) {
   const { north, south } = s;
   const missing = [...RANKS].filter((c) => !north.includes(c) && !south.includes(c)).map((c) => RANKS.indexOf(c) + 2);
   const west = fmt(shuffle([...missing, ...Array(26 - missing.length).fill(0)]).slice(0, 13).filter(Boolean));
-  const target = analysis.goal.kind === 'tricks' ? analysis.goal.target : undefined;
-  const snap = JSON.parse(await call('start', [west, target]));
+  const snap = JSON.parse(await call('start', [west, analysis.target]));
   if (search !== s) return;
   const suit = SUITS[Math.floor(Math.random() * SUITS.length)];
   problem = { search: s, north, south, suit, analysis, snap, plays: [...snap.plays], log: [], lead: null, done: false, busy: false, node: follow(analysis.plan, snap.plays) };
@@ -361,10 +350,8 @@ function info(text, error = false) {
 
 // --- rendering --------------------------------------------------------------
 
-function goalText(goal) {
-  return goal.kind === 'tricks'
-    ? `How do you play for ${goal.target} trick${goal.target === 1 ? '' : 's'}?`
-    : 'How do you play for the most tricks on average?';
+function goalText(target) {
+  return `How do you play for ${target} trick${target === 1 ? '' : 's'}?`;
 }
 
 
@@ -424,7 +411,7 @@ function render() {
 
   const q = document.createElement('p');
   q.className = 'question';
-  q.textContent = goalText(analysis.goal);
+  q.textContent = goalText(analysis.target);
   el.appendChild(q);
 
   const t = document.createElement('p');
@@ -439,7 +426,7 @@ function render() {
   const s = document.createElement('p');
   s.className = 'status';
   s.innerHTML = `<span>Tricks won: ${snap.won}</span>`
-    + (playing ? `<span>Best from here: ${value(analysis.goal, Math.max(...snap.moves.map((m) => m.score)), snap.weight)}</span>
+    + (playing ? `<span>Best from here: ${value(Math.max(...snap.moves.map((m) => m.score)), snap.weight)}</span>
       <button class="secondary" id="reveal">Show solution</button>` : '');
   el.appendChild(s);
   if (playing) id('reveal').onclick = finish;
@@ -469,8 +456,7 @@ function follow(node, plays) {
 async function play(rank) {
   if (problem.busy) return;
   problem.busy = true;
-  const { snap, analysis, plays, log } = problem;
-  const goal = analysis.goal;
+  const { snap, plays, log } = problem;
   const chosen = snap.moves.find((m) => m.cards.includes(rank));
   const best = Math.max(...snap.moves.map((m) => m.score));
   // The plan keeps what the whole line needs, which a fresh look from here
@@ -485,8 +471,8 @@ async function play(rank) {
     .join(' or ');
   log.push({
     ok,
-    text: `Trick ${Math.floor(plays.length / 4) + 1}, ${chosen.seat} ${cardText(rank)}: ${value(goal, chosen.score, snap.weight)}`
-      + (chosen.score === best ? '' : `; ${planned ? 'the optimal line\'s card; afresh from here, ' : ''}best ${value(goal, best, snap.weight)} with ${alternatives}`),
+    text: `Trick ${Math.floor(plays.length / 4) + 1}, ${chosen.seat} ${cardText(rank)}: ${value(chosen.score, snap.weight)}`
+      + (chosen.score === best ? '' : `; ${planned ? 'the optimal line\'s card; afresh from here, ' : ''}best ${value(best, snap.weight)} with ${alternatives}`),
   });
   // Every state was memoized by the analysis, so this is quick.
   let next;
@@ -508,7 +494,6 @@ async function play(rank) {
 // Ends the play (if still going) and shows the full analysis.
 function finish() {
   const { analysis, snap, lead, log } = problem;
-  const goal = analysis.goal;
   problem.done = true;
   render();
   const best = Math.max(...analysis.leads.map((l) => l.score));
@@ -517,19 +502,16 @@ function finish() {
   if (!snap.over) {
     ok = false;
     verdict = 'Solution';
-  } else if (goal.kind === 'tricks') {
-    ok = snap.won >= goal.target;
-    verdict = ok ? `✓ Made: ${snap.won} tricks` : `✗ Down: ${snap.won} of ${goal.target} tricks`;
   } else {
-    ok = log.every((l) => l.ok);
-    verdict = `${snap.won} tricks taken`;
+    ok = snap.won >= analysis.target;
+    verdict = ok ? `✓ Made: ${snap.won} tricks` : `✗ Down: ${snap.won} of ${analysis.target} tricks`;
   }
   const mistakes = log.filter((l) => !l.ok).length;
   const played = log.length ? ` — ${mistakes === 0 ? 'every card was best' : `${mistakes} card${mistakes === 1 ? '' : 's'} not best`}` : '';
   const rows = [...analysis.leads]
     .sort((a, b) => b.score - a.score)
     .map((l) => `<tr class="${l.score === best ? 'best' : ''} ${lead && l.seat === lead.seat && l.cards === lead.cards ? 'chosen' : ''}">
-      <td>${l.seat}: ${cardsText(l.cards)}</td><td class="num">${value(goal, l.score, TOTAL)}</td></tr>`)
+      <td>${l.seat}: ${cardsText(l.cards)}</td><td class="num">${value(l.score, TOTAL)}</td></tr>`)
     .join('');
   const fb = id('feedback');
   fb.classList.remove('hidden');
@@ -538,9 +520,9 @@ function finish() {
     <div class="panel-title">Every lead</div>
     <table class="leads">${rows}</table>
     <div class="panel-title">Optimal line</div>
-    <div class="plan"><ul>${planItems(analysis.plan, goal, problem.north, problem.south)}</ul></div>
+    <div class="plan"><ul>${planItems(analysis.plan, problem.north, problem.south)}</ul></div>
     <p style="margin:0.8rem 0 0"><button class="primary" id="next">Next problem</button>
-      <a class="secondary" href="analyse.html#${encodeURIComponent(JSON.stringify({ n: problem.north, s: problem.south, goal: goalKey(goal) }))}">Analyse</a></p>`;
+      <a class="secondary" href="analyse.html#${encodeURIComponent(JSON.stringify({ n: problem.north, s: problem.south, goal: goalKey(analysis.target) }))}">Analyse</a></p>`;
   id('next').onclick = newProblem;
 }
 

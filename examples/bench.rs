@@ -7,8 +7,8 @@
 //!
 //! `gen` samples one combination per stratum (missing cards 4..=12, North's
 //! length, missing honours among AKQJ), then appends the known slow cases.
-//! `run` solves every combination for each trick target and expected tricks
-//! (`ev`), one process per run so a timeout or crash costs only that run.
+//! `run` solves every combination for each trick target, one process per
+//! run so a timeout or crash costs only that run.
 //! Each run gets the timeout as its engine budget, and is killed at twice
 //! that.  Rows go to stdout as TSV, with `proof` saying how each run ended:
 //! `proven`, `interrupted` (out of budget; `bound` still holds), `timeout`
@@ -19,7 +19,7 @@ use contract_bridge::Holding;
 use std::io::Read;
 use std::process::{Command, Stdio};
 use std::time::{Duration, Instant};
-use suit_combination::{Error, Goal, Solver, TOTAL};
+use suit_combination::{Error, Solver, TOTAL};
 
 const SLOW: &[&str] = &[
     "A953 KJ8", "KJ84 T63", "KQ85 T73", "KJ85 T63", "KT85 J63", "KJ62 T84", "AQ95 T73", "A862 J94",
@@ -86,25 +86,19 @@ fn generate(seed: u64) {
 fn goals(north: Holding, south: Holding) -> Vec<String> {
     (1..=north.len().max(south.len()))
         .map(|t| format!("t{t}"))
-        .chain(["ev".into()])
         .collect()
 }
 
 /// Solve one run within `budget` and print `score bound states widest ms
 /// vmhwm_kb proof`
 fn one(north: Holding, south: Holding, goal: &str, budget: Option<Duration>) {
-    let goal = match goal {
-        "ev" => Goal::ExactExpected,
-        t => Goal::Tricks {
-            target: t[1..].parse().expect("target"),
-        },
-    };
+    let target: u8 = goal[1..].parse().expect("target");
     let start = Instant::now();
     let mut solver = Solver::new(north, south).expect("combination");
     if let Some(budget) = budget {
         solver.set_interrupt(move |_| start.elapsed() >= budget);
     }
-    let (score, bound, proof) = match solver.analyze(goal) {
+    let (score, bound, proof) = match solver.analyze(target) {
         Ok(a) => (a.score, a.score, "proven"),
         Err(Error::Interrupted { bound, .. }) => (0, bound, "interrupted"),
         Err(e) => panic!("{e}"),
@@ -209,7 +203,10 @@ fn run(corpus: &str, timeout: Duration) {
     let text = std::fs::read_to_string(corpus).expect("corpus");
     println!("north\tsouth\tgoal\tstatus\tms\tvmhwm_kb\tscore\tbound\tstates\twidest\tproof");
     let mut rows = Vec::new();
-    for line in text.lines().filter(|l| !l.trim().is_empty() && !l.starts_with('#')) {
+    for line in text
+        .lines()
+        .filter(|l| !l.trim().is_empty() && !l.starts_with('#'))
+    {
         let [n, s] = line.split_whitespace().collect::<Vec<_>>()[..] else {
             panic!("bad corpus line: {line}");
         };
@@ -232,7 +229,11 @@ fn run(corpus: &str, timeout: Duration) {
             rows.push(r);
         }
     }
-    let mut times: Vec<f64> = rows.iter().filter(|r| r.status == "ok").map(|r| r.ms).collect();
+    let mut times: Vec<f64> = rows
+        .iter()
+        .filter(|r| r.status == "ok")
+        .map(|r| r.ms)
+        .collect();
     times.sort_by(f64::total_cmp);
     let count = |status: &str| rows.iter().filter(|r| r.status == status).count();
     let proof = |p: &str| rows.iter().filter(|r| r.proof == p).count();
@@ -245,7 +246,10 @@ fn run(corpus: &str, timeout: Duration) {
             } else {
                 String::new()
             };
-            format!("{} {} {} {} {:.0} ms{bound}", r.north, r.south, r.goal, r.status, r.ms)
+            format!(
+                "{} {} {} {} {:.0} ms{bound}",
+                r.north, r.south, r.goal, r.status, r.ms
+            )
         })
         .collect();
     eprintln!(

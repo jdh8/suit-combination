@@ -15,9 +15,9 @@ export function normalize(text) {
   return fmt([...seen].map(rankOf));
 }
 
-// `score` out of `weight`: a probability or an expected number of tricks
-export function value(goal, score, weight) {
-  return goal.kind === 'tricks' ? `${(score / weight * 100).toFixed(1)}%` : `${(score / weight).toFixed(2)} tricks`;
+// `score` out of `weight`: a probability
+export function value(score, weight) {
+  return `${(score / weight * 100).toFixed(1)}%`;
 }
 
 // The defenders' cards: every rank North and South lack, as rank values
@@ -54,42 +54,42 @@ export function describe(node, trick, out) {
 
 const labelText = (labels) => (labels.length === 1 && labels[0] === null ? 'shows out' : `plays ${labels.map((l) => (l === null ? 'nothing' : rankText(l))).join('/')}`);
 
-function made(goal) {
-  return `<li class="made">${goal.kind === 'tricks' ? '✓ made' : '✓ every trick played for is in'}</li>`;
+function made() {
+  return `<li class="made">✓ made</li>`;
 }
 
-function hopeless(goal) {
-  return `<li class="hopeless">${goal.kind === 'tricks' ? 'cannot be made from here — play on for what it is worth' : 'no more tricks to be had'}</li>`;
+function hopeless() {
+  return `<li class="hopeless">cannot be made from here — play on for what it is worth</li>`;
 }
 
 // The plan as list items: declarer's steps as siblings, each defender
 // choice opening one nested list per distinct continuation
-export function planItems(plan, goal, north, south) {
-  return items(plan, goal, [], missing(north, south));
+export function planItems(plan, north, south) {
+  return items(plan, [], missing(north, south));
 }
 
-function items(plan, goal, trick, out) {
+function items(plan, trick, out) {
   switch (plan.kind) {
     case 'made':
-      return made(goal);
+      return made();
     case 'hopeless':
-      return hopeless(goal);
+      return hopeless();
     case 'declarer':
     case 'ruff': {
       const { text, card } = describe(plan, trick, out);
-      return `<li>${text}</li>` + items(plan.then, goal, advance(trick, card), out);
+      return `<li>${text}</li>` + items(plan.then, advance(trick, card), out);
     }
     case 'defender': {
       const follow = (labels, sub) => {
         const card = pick(labels);
         const rest = new Set(out);
         rest.delete(card);
-        return items(sub, goal, advance(trick, card), rest);
+        return items(sub, advance(trick, card), rest);
       };
       if (plan.branches.length === 1 && !plan.ruff) return follow(...plan.branches[0]);
       const branch = (what, inner) => `<li><span class="branch">${plan.seat} ${what}:</span><ul>${inner}</ul></li>`;
       return plan.branches.map(([labels, sub]) => branch(labelText(labels), follow(labels, sub))).join('')
-        + (plan.ruff ? branch('ruffs', items(plan.ruff, goal, advance(trick, 'ruff'), out)) : '');
+        + (plan.ruff ? branch('ruffs', items(plan.ruff, advance(trick, 'ruff'), out)) : '');
     }
     default:
       return '';

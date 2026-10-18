@@ -12,8 +12,8 @@ entries, no ruffs, no fixed plays, only this suit's tricks count.
 | Field | Meaning |
 | --- | --- |
 | `north`, `south` | Holdings, ranks descending |
-| `goal` | Trick target (integer) or `"expected"` (exact expected tricks) |
-| `score` | Exact result out of `TOTAL = C(26,13)` (deals for a target; tricks x TOTAL for expected) |
+| `goal` | Trick target (integer) |
+| `score` | Deals making the target, out of `TOTAL = C(26,13)` |
 | `value`, `tolerance` | Published rounded result and its half-interval (tolerance defaults to 0.00005) |
 | `leads` | Ranks whose opening play must be optimal for the goal |
 | `avoid` | Ranks whose opening play must be strictly worse |

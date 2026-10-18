@@ -3,7 +3,7 @@
 //! as JSON, and plays the suit out trick by trick.
 
 use contract_bridge::Holding;
-use suit_combination::{Constraints, Error, Game, Goal, Scoring, Solver};
+use suit_combination::{Constraints, Error, Game, Scoring, Solver};
 use wasm_bindgen::prelude::{JsValue, wasm_bindgen};
 
 #[wasm_bindgen]
@@ -76,14 +76,14 @@ impl Trainer {
 
     /// `suit_combination::Comparison` under `scoring`
     /// (`suit_combination::Scoring` as JSON), or, out of budget or memory,
-    /// what [`analyze`](Self::analyze) returns then for expected tricks
+    /// `{interrupted: true, bound, memory}`; the bound is not meaningful here
     pub fn compare(&mut self, scoring: &str) -> Result<String, JsValue> {
         let scoring: Scoring =
             serde_json::from_str(scoring).map_err(|e| err(format!("scoring: {e}")))?;
         self.arm();
         match self.solver.compare(scoring) {
             Ok(c) => serde_json::to_string(&c).map_err(err),
-            Err(e) => Ok(self.interrupted(Goal::ExactExpected, e)?.to_string()),
+            Err(e) => Ok(self.interrupted(e)?.to_string()),
         }
     }
 
@@ -94,11 +94,10 @@ impl Trainer {
             .set_interrupt(move |_| memory() > MEMORY_CAP || deadline.is_some_and(|d| now() >= d));
     }
 
-    /// `{goal, interrupted: true, bound, memory}` for an interrupted search
-    fn interrupted(&self, goal: Goal, e: Error) -> Result<serde_json::Value, JsValue> {
+    /// `{interrupted: true, bound, memory}` for an interrupted search
+    fn interrupted(&self, e: Error) -> Result<serde_json::Value, JsValue> {
         match e {
             Error::Interrupted { bound, .. } => Ok(serde_json::json!({
-                "goal": goal,
                 "interrupted": true,
                 "bound": bound,
                 "memory": memory() > MEMORY_CAP,
@@ -114,43 +113,37 @@ impl Trainer {
         self.budget = (ms > 0.0).then_some(ms);
     }
 
-    /// The `suit_combination::Analysis` of `goal`, or, out of budget or
-    /// memory, `{goal, interrupted: true, bound, memory}` with an upper bound
+    /// The `suit_combination::Analysis` of `target`, or, out of budget or
+    /// memory, `{interrupted: true, bound, memory}` with an upper bound
     /// on its score; `memory` says asking again is no use
-    fn analyze(&mut self, goal: Goal) -> Result<serde_json::Value, JsValue> {
+    fn analyze(&mut self, target: u8) -> Result<serde_json::Value, JsValue> {
         self.arm();
-        match self.solver.analyze(goal) {
+        match self.solver.analyze(target) {
             Ok(a) => serde_json::to_value(&a).map_err(err),
-            Err(e) => self.interrupted(goal, e),
+            Err(e) => self.interrupted(e),
         }
     }
 
     /// [`analyze`](Self::analyze) for at least `target` tricks, as JSON
     pub fn target(&mut self, target: u8) -> Result<String, JsValue> {
-        Ok(self.analyze(Goal::Tricks { target })?.to_string())
+        Ok(self.analyze(target)?.to_string())
     }
 
     /// Every target from one trick up to the most there are: a JSON
     /// array of what [`target`](Self::target) returns, each within the budget
     pub fn targets(&mut self) -> Result<String, JsValue> {
         let all = (1..=self.max_tricks)
-            .map(|target| self.analyze(Goal::Tricks { target }))
+            .map(|target| self.analyze(target))
             .collect::<Result<Vec<_>, _>>()?;
         Ok(serde_json::Value::from(all).to_string())
     }
 
-    /// [`analyze`](Self::analyze) for expected tricks as JSON
-    pub fn expected(&mut self) -> Result<String, JsValue> {
-        Ok(self.analyze(Goal::ExactExpected)?.to_string())
-    }
-
     /// Deal `west` the given cards (East gets the rest) and start playing
-    /// for `target` tricks, or for expected tricks when `target` is absent.  Returns the opening snapshot.  Play runs to the
+    /// for `target` tricks. Returns the opening snapshot. Play runs to the
     /// end of each call, whatever the budget, on what the analysis memoized.
-    pub fn start(&mut self, west: &str, target: Option<u8>) -> Result<String, JsValue> {
+    pub fn start(&mut self, west: &str, target: u8) -> Result<String, JsValue> {
         let west: Holding = west.parse().map_err(|e| err(format!("West: {e}")))?;
-        let goal = target.map_or(Goal::ExactExpected, |target| Goal::Tricks { target });
-        self.game = Some(Game::new(&mut self.solver, west, goal).map_err(err)?);
+        self.game = Some(Game::new(&mut self.solver, west, target).map_err(err)?);
         self.snapshot(vec![])
     }
 

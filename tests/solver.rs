@@ -1,22 +1,16 @@
 //! Suit-combination analysis and play through the public API.
 
 use contract_bridge::{Holding, Seat};
-use suit_combination::{
-    Analysis, Constraints, Error, Game, Goal, Plan, Solver, TOTAL, analyze, analyze_all,
-};
+use suit_combination::{Analysis, Constraints, Error, Game, Solver, TOTAL, analyze, analyze_all};
 
 fn binom(n: u64, k: u64) -> u64 {
     (0..k).fold(1, |acc, i| acc * (n - i) / (i + 1))
 }
 
-fn score(north: &str, south: &str, goal: Goal) -> u64 {
-    analyze(north.parse().unwrap(), south.parse().unwrap(), goal)
+fn tricks(north: &str, south: &str, target: u8) -> u64 {
+    analyze(north.parse().unwrap(), south.parse().unwrap(), target)
         .unwrap()
         .score
-}
-
-fn tricks(north: &str, south: &str, target: u8) -> u64 {
-    score(north, south, Goal::Tricks { target })
 }
 
 fn lead_score(analysis: &Analysis, card: &str) -> u64 {
@@ -41,12 +35,7 @@ fn pavlicek_missing_the_jack() {
 fn pavlicek_missing_the_queen() {
     // https://www.rpbridge.net/4a00.htm #9: cash K to retain the finesse.
     // Only East holding all three missing cards (QT8) defeats five tricks.
-    let analysis = analyze(
-        "AJ976".parse().unwrap(),
-        "K5432".parse().unwrap(),
-        Goal::Tricks { target: 5 },
-    )
-    .unwrap();
+    let analysis = analyze("AJ976".parse().unwrap(), "K5432".parse().unwrap(), 5).unwrap();
     assert_eq!(analysis.score, TOTAL - binom(23, 13));
     assert_eq!(lead_score(&analysis, "K"), analysis.score);
     assert_eq!(lead_score(&analysis, "A"), TOTAL - 2 * binom(23, 13));
@@ -56,12 +45,7 @@ fn pavlicek_missing_the_queen() {
 fn pavlicek_unsupported_jack() {
     // https://www.rpbridge.net/4a00.htm #12: lead low, not the unsupported J.
     // Five tricks require West's K doubleton: four choices of companion.
-    let analysis = analyze(
-        "AQ654".parse().unwrap(),
-        "J32".parse().unwrap(),
-        Goal::Tricks { target: 5 },
-    )
-    .unwrap();
+    let analysis = analyze("AQ654".parse().unwrap(), "J32".parse().unwrap(), 5).unwrap();
     assert_eq!(analysis.score, 4 * binom(21, 11));
     assert_eq!(lead_score(&analysis, "2"), analysis.score);
     assert_eq!(lead_score(&analysis, "J"), 0);
@@ -72,12 +56,7 @@ fn todd_three_trick_safety_play() {
     // Robert S. Todd, "My Favorite Card Combination", Example 2:
     // https://www.advinbridge.com/this-week-in-bridge/608
     // Cash K, then lead toward A9: three tricks even against a 5-0 split.
-    let analysis = analyze(
-        "KJ43".parse().unwrap(),
-        "A952".parse().unwrap(),
-        Goal::Tricks { target: 3 },
-    )
-    .unwrap();
+    let analysis = analyze("KJ43".parse().unwrap(), "A952".parse().unwrap(), 3).unwrap();
     assert_eq!(analysis.score, TOTAL);
     assert_eq!(lead_score(&analysis, "K"), TOTAL);
     assert!(lead_score(&analysis, "A") < TOTAL);
@@ -93,8 +72,8 @@ fn splits() {
     assert_eq!(tricks("AKQ32", "54", 5), three_three);
     assert_eq!(tricks("AKQ32", "54", 4), three_three + four_two);
     assert_eq!(
-        score("AKQ32", "54", Goal::ExactExpected),
-        5 * three_three + 4 * four_two + 3 * (five_one + six_zero)
+        tricks("AKQ32", "54", 3),
+        three_three + four_two + five_one + six_zero
     );
 }
 
@@ -104,10 +83,7 @@ fn stiff_king_offside() {
     // Beats K onside plus a singleton K offside — better than a plain finesse.
     let two = TOTAL / 2 + binom(18, 6);
     assert_eq!(tricks("AQ3", "42", 2), two);
-    assert_eq!(
-        score("AQ3", "42", Goal::ExactExpected),
-        2 * two + (TOTAL - two)
-    );
+    assert_eq!(tricks("AQ3", "42", 1), TOTAL);
 }
 
 #[test]
@@ -122,7 +98,7 @@ fn reading_group_problem_one() {
 #[test]
 fn plays_out_against_the_layout() {
     let h = |s: &str| s.parse::<Holding>().unwrap();
-    let goal = Goal::Tricks { target: 5 };
+    let goal = 5;
     for (west, want) in [("J98", 5), ("JT98", 4), ("JT9876", 3)] {
         let mut solver = Solver::new(h("AKQ32"), h("54")).unwrap();
         let mut game = Game::new(&mut solver, h(west), goal).unwrap();
@@ -150,60 +126,14 @@ fn plays_out_against_the_layout() {
 }
 
 #[test]
-fn expected_plan_plays_out_in_the_game() {
-    // The game follows the recommended line to the end.  Its cards are not
-    // all graded best: the plan keeps what the root's optimum needs, while
-    // the game grades by the best from here (A8 / JT62, West KQ: after
-    // West's Q the plan ducks, the game grades the A).
-    let h = |s: &str| s.parse::<Holding>().unwrap();
-    for (north, south, wests) in [
-        ("AQ3", "42", ["K", "KJ", "J9876"]),
-        ("A8", "JT62", ["", "KQ", "Q9"]),
-    ] {
-        for west in wests {
-            let mut solver = Solver::new(h(north), h(south)).unwrap();
-            let analysis = solver.analyze(Goal::ExactExpected).unwrap();
-            let mut game = Game::new(&mut solver, h(west), Goal::ExactExpected).unwrap();
-            assert_eq!(game.moves(&mut solver), analysis.leads);
-            let mut plan = &analysis.plan;
-            while let Plan::Declarer { cards, then, .. } = plan {
-                let moves = game.moves(&mut solver);
-                assert!(
-                    moves.iter().any(|l| l.cards == *cards),
-                    "{north} {south} West {west}"
-                );
-                let rank = cards.iter().next().unwrap();
-                let plays = game.play(&mut solver, rank).unwrap();
-                plan = then;
-                // Follow the plan through the defenders' and forced cards.
-                for p in &plays[1..] {
-                    plan = match plan {
-                        Plan::Defender { branches, .. } => {
-                            &branches
-                                .iter()
-                                .find(|(labels, _)| labels.contains(&p.card))
-                                .unwrap()
-                                .1
-                        }
-                        Plan::Declarer { then, .. } => then,
-                        _ => break,
-                    };
-                }
-            }
-        }
-    }
-}
-
-#[test]
 fn errors() {
     let h = |s: &str| s.parse::<Holding>().unwrap();
-    let t = |target| Goal::Tricks { target };
-    assert_eq!(analyze(h("AK"), h("A2"), t(1)).unwrap_err(), Error::Overlap);
+    assert_eq!(analyze(h("AK"), h("A2"), 1).unwrap_err(), Error::Overlap);
     // Nine missing cards are fine; no card held, or too many missing cards
     // told apart (nine known singletons make 2^9 x 3 layouts), are not
     assert_eq!(tricks("AK", "32", 2), TOTAL);
     assert_eq!(
-        analyze(Holding::EMPTY, Holding::EMPTY, t(1)).unwrap_err(),
+        analyze(Holding::EMPTY, Holding::EMPTY, 1).unwrap_err(),
         Error::TooManyMissing
     );
     let known = Constraints {
@@ -214,11 +144,8 @@ fn errors() {
         Solver::with_constraints(h("A"), h("2"), known).err(),
         Some(Error::TooManyMissing)
     );
-    assert_eq!(
-        analyze(h("AKQ"), h("32"), t(4)).unwrap_err(),
-        Error::BadTarget
-    );
-    assert_eq!(analyze_all(h("AKQ"), h("32")).unwrap().len(), 4);
+    assert_eq!(analyze(h("AKQ"), h("32"), 4).unwrap_err(), Error::BadTarget);
+    assert_eq!(analyze_all(h("AKQ"), h("32")).unwrap().len(), 3);
 }
 
 #[test]
@@ -232,7 +159,7 @@ fn restricted_choice_in_the_game() {
     // C(22, 10)).
     let h = |s: &str| s.parse::<Holding>().unwrap();
     let mut solver = Solver::new(h("AKT98"), h("5432")).unwrap();
-    let mut game = Game::new(&mut solver, h("J76"), Goal::Tricks { target: 5 }).unwrap();
+    let mut game = Game::new(&mut solver, h("J76"), 5).unwrap();
     let plays: Vec<_> = game
         .play(&mut solver, "A".parse().unwrap())
         .unwrap()
@@ -293,9 +220,9 @@ fn constraint_errors() {
     assert_eq!(error(solver([13, 1], "", "KJ")), Some(Error::NoLayout));
 
     let mut s = solver([13, 7], "", "K").unwrap();
-    // Every target, then expected tricks
-    assert_eq!(s.analyze_all().unwrap().len(), 4);
-    let t = Goal::Tricks { target: 2 };
+    // Every target
+    assert_eq!(s.analyze_all().unwrap().len(), 3);
+    let t = 2;
     assert_eq!(Game::new(&mut s, h("J"), t).unwrap_err(), Error::BadWest);
     // More cards than West's places
     let mut five = solver([13, 5], "", "").unwrap();
@@ -356,8 +283,8 @@ fn errors_of_play_constraints() {
     );
     // Targets stop at the rounds
     let mut s = solver(Constraints { rounds: 1, ..d }).unwrap();
-    assert_eq!(s.analyze_all().unwrap().len(), 2);
-    let t = Goal::Tricks { target: 2 };
+    assert_eq!(s.analyze_all().unwrap().len(), 1);
+    let t = 2;
     assert_eq!(s.analyze(t).unwrap_err(), Error::BadTarget);
     // Games cannot show a ruff
     let mut s = solver(Constraints {
@@ -380,7 +307,7 @@ fn interrupted_bound_counts_declarer_ruffs() {
         ruffs: [1, 0, 0, 0],
         ..Constraints::default()
     };
-    let goal = Goal::Tricks { target: 5 };
+    let goal = 5;
     let best = Solver::with_constraints(h("A2"), h("KQ543"), c)
         .unwrap()
         .analyze(goal)

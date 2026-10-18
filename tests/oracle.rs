@@ -25,7 +25,7 @@ use std::collections::HashMap;
 use std::rc::Rc;
 use std::sync::Mutex;
 use std::sync::atomic::{AtomicUsize, Ordering};
-use suit_combination::{Constraints, Error, Goal, Scoring, Solver, TOTAL};
+use suit_combination::{Constraints, Error, Scoring, Solver, TOTAL};
 
 /// Seats by index, as the trick goes round
 const NORTH: usize = 0;
@@ -565,8 +565,8 @@ fn name(north: Holding, south: Holding) -> String {
 }
 
 /// Disagreements between the engine and the oracle, and how many numbers
-/// were compared.  Every trick target and exact expected tricks must match
-/// exactly, overall and per opening card.
+/// were compared.  Every trick target must match exactly, overall and per
+/// opening card.
 fn compare(north: Holding, south: Holding, c: Constraints, o: &Solved) -> (Vec<String>, usize) {
     let mut fails = Vec::new();
     let mut checks = 0;
@@ -574,11 +574,9 @@ fn compare(north: Holding, south: Holding, c: Constraints, o: &Solved) -> (Vec<S
     let mut solver = Solver::with_constraints(north, south, c).unwrap();
     let d = c.discards;
     let longer = ((north - d).len().max((south - d).len()) as u8).min(c.rounds);
-    let goals = (1..=longer)
-        .map(|target| (Goal::Tricks { target }, Some(target)))
-        .chain([(Goal::ExactExpected, None)]);
-    for (goal, target) in goals {
+    for goal in 1..=longer {
         let a = solver.analyze(goal).unwrap();
+        let target = Some(goal);
         let want = o.best(target);
         checks += 1;
         if a.score != want {
@@ -876,8 +874,7 @@ fn oracle_agrees_on_reference_cases() {
     struct Case {
         north: String,
         south: String,
-        /// A trick target, or "expected"
-        goal: serde_json::Value,
+        goal: u8,
         vacant: Option<[u8; 2]>,
         east: Option<String>,
         west: Option<String>,
@@ -928,8 +925,7 @@ fn oracle_agrees_on_reference_cases() {
         }
         let o = &solved.iter().find(|(k, _)| *k == combo).unwrap().1;
         let total: u64 = o.oracle.weights.iter().sum();
-        let target = c.goal.as_u64().map(|t| u8::try_from(t).unwrap());
-        assert!(target.is_some() || c.goal == "expected", "{}", c.goal);
+        let target = Some(c.goal);
         let name = format!("{} {target:?}", name(combo.0, combo.1));
         let best = o.best(target);
         if c.score.is_some_and(|s| s != best) {
@@ -978,14 +974,8 @@ fn interrupted_bound_is_double_dummy() {
             let tricks = Solved::with(north, south, rules).best(None) / weight;
             deals[tricks as usize] += weight;
         }
-        let goals = (1..=max)
-            .map(|target| Goal::Tricks { target })
-            .chain([Goal::ExactExpected]);
-        for goal in goals {
-            let want: u64 = match goal {
-                Goal::Tricks { target } => deals[usize::from(target)..].iter().sum(),
-                _ => deals.iter().enumerate().map(|(t, &d)| t as u64 * d).sum(),
-            };
+        for goal in 1..=max {
+            let want: u64 = deals[usize::from(goal)..].iter().sum();
             let mut solver = Solver::new(north, south).unwrap();
             solver.set_poll_interval(1);
             solver.set_interrupt(|_| true);

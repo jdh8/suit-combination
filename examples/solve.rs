@@ -1,4 +1,4 @@
-//! `cargo run --release --example solve -- AJ52 K76 [TARGET|ev|mp|imps CONTRACT NEED]
+//! `cargo run --release --example solve -- AJ52 K76 [TARGET|mp|imps CONTRACT NEED]
 //! [--vulnerable] [--budget SECS]
 //! [--vacant EAST,WEST] [--east CARDS] [--west CARDS] [--length EAST,WEST]
 //! [--hcp EAST,WEST] [--first N|S] [--entries NORTH,SOUTH] [--rounds N]
@@ -20,7 +20,7 @@
 
 use contract_bridge::{Holding, Rank, Seat};
 use std::time::{Duration, Instant};
-use suit_combination::{Comparison, Constraints, Error, Goal, Plan, Scoring, Solver};
+use suit_combination::{Comparison, Constraints, Error, Plan, Scoring, Solver};
 
 fn fail(message: impl std::fmt::Display) -> ! {
     eprintln!("{message}");
@@ -38,7 +38,7 @@ fn holding(seat: &str, s: &str) -> Holding {
     })
 }
 
-const USAGE: &str = "usage: solve NORTH SOUTH [TARGET|ev|mp|imps CONTRACT NEED] [--vulnerable] \
+const USAGE: &str = "usage: solve NORTH SOUTH [TARGET|mp|imps CONTRACT NEED] [--vulnerable] \
     [--budget SECS] \
     [--vacant EAST,WEST] [--east CARDS] [--west CARDS] [--length EAST,WEST] [--hcp EAST,WEST] \
     [--first N|S] [--entries NORTH,SOUTH] [--rounds N] [--lead CARD] [--discard CARDS] \
@@ -57,8 +57,7 @@ fn compared(c: &Comparison) {
             .map(|&w| format!("{:.2}", per(w) * 100.0))
             .collect();
         println!(
-            "line {i}: lead {cards} from {seat:?}, {:.3} tricks, % by tricks {}",
-            per(l.score),
+            "line {i}: lead {cards} from {seat:?}, % by tricks {}",
             tricks.join(" ")
         );
     }
@@ -214,69 +213,47 @@ fn main() {
         compared(&c);
         return;
     }
-    let goals = match rest {
-        [t] if t == "ev" => vec![Goal::ExactExpected],
-        [t] => vec![Goal::Tricks {
-            target: t.parse().unwrap_or_else(|_| fail(format!("target: {t}?"))),
-        }],
-        [] => (1..=max)
-            .map(|target| Goal::Tricks { target })
-            .chain([Goal::ExactExpected])
-            .collect(),
+    let targets: Vec<u8> = match rest {
+        [t] => vec![t.parse().unwrap_or_else(|_| fail(format!("target: {t}?")))],
+        [] => (1..=max).collect(),
         _ => fail(USAGE),
     };
     let start = Instant::now();
-    let results: Vec<_> = goals
+    let results: Vec<_> = targets
         .iter()
-        .map(|&goal| {
+        .map(|&target| {
             if let Some(budget) = budget {
                 let deadline = Instant::now() + budget;
                 solver.set_interrupt(move |_| Instant::now() >= deadline);
             }
-            match solver.analyze(goal) {
+            match solver.analyze(target) {
                 Err(e @ (Error::BadTarget | Error::Unsupported)) => fail(e),
-                r => (goal, r),
+                r => (target, r),
             }
         })
         .collect();
     let elapsed = start.elapsed();
-    let value = |goal: Goal, score: u64| match goal {
-        Goal::Tricks { .. } => format!("{:.2}%", score as f64 / total as f64 * 100.0),
-        _ => format!("{:.3} tricks", score as f64 / total as f64),
-    };
-    let name = |goal: Goal| match goal {
-        Goal::Tricks { target } => format!("{target} tricks"),
-        _ => "expected".to_string(),
-    };
+    let value = |score: u64| format!("{:.2}%", score as f64 / total as f64 * 100.0);
     println!("{north} opposite {south}");
-    for (goal, r) in &results {
+    for (target, r) in &results {
         match r {
-            Ok(a) => println!("{}: {}", name(*goal), value(*goal, a.score)),
+            Ok(a) => println!("{target} tricks: {}", value(a.score)),
             Err(Error::Interrupted { bound, .. }) => {
-                println!(
-                    "{}: interrupted (best <= {})",
-                    name(*goal),
-                    value(*goal, *bound)
-                );
+                println!("{target} tricks: interrupted (best <= {})", value(*bound));
             }
             Err(e) => fail(e),
         }
     }
-    // Show the line for the last nontrivial goal (every trick or no trick is no decision).
+    // Show the line for the last nontrivial target (every trick or no trick is no decision).
     if let Some(a) = results
         .iter()
         .rev()
         .filter_map(|(_, r)| r.as_ref().ok())
-        .find(|a| !matches!(a.goal, Goal::Tricks { .. }) || (a.score < total && a.score > 0))
+        .find(|a| a.score < total && a.score > 0)
     {
-        println!("\nLine for {}: {}", name(a.goal), value(a.goal, a.score));
+        println!("\nLine for {} tricks: {}", a.target, value(a.score));
         for l in &a.leads {
-            println!(
-                "  lead {} from {:?}: {}",
-                l.cards,
-                l.seat,
-                value(a.goal, l.score)
-            );
+            println!("  lead {} from {:?}: {}", l.cards, l.seat, value(l.score));
         }
         print!("{}", a.plan);
     }

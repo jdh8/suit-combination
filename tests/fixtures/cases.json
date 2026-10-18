@@ -13,10 +13,6 @@
     "source": "SuitC User Guide 9, pp. 2-3", "checked": "2026-10-16", "note": "Published as 55.39 percent"
   },
   {
-    "north": "KQT32", "south": "654", "goal": "expected", "value": 3.43, "tolerance": 0.005,
-    "source": "SuitC User Guide 9, pp. 2-3", "checked": "2026-10-16", "note": "Published as 3.43 tricks"
-  },
-  {
     "north": "KJ43", "south": "A952", "goal": 3, "score": 10400600, "leads": ["K"], "avoid": ["A"],
     "source": "Robert S. Todd, My Favorite Card Combination, example 2, https://www.advinbridge.com/this-week-in-bridge/608",
     "checked": "2026-10-16", "note": "Published as a 100 percent line: K first, then toward the A9"
@@ -82,11 +78,6 @@
     "north": "AJT3", "south": "Q92", "goal": 4, "leads": ["9"],
     "source": "Pavlicek, Card Combinations #14", "checked": "2026-10-16",
     "note": "Pavlicek avoids the Q as weaker technique (it keeps the lead in the wrong hand); with unlimited entries the engine rates the Q and the 9 equal for every goal"
-  },
-  {
-    "north": "AJ983", "south": "Q2", "goal": "expected", "leads": ["Q"],
-    "source": "Pavlicek, Card Combinations #15", "checked": "2026-10-16",
-    "note": "The Q is the most-tricks lead; for four tricks alone the engine prefers the 2 (71.46 vs 70.25 percent)"
   },
   {
     "north": "QJ654", "south": "A32", "goal": 4, "leads": ["A"],
@@ -173,28 +164,14 @@
     "source": "Hand derivation: 3-3 or 4-2, 20 * C(20,10) + 30 * C(20,11)", "checked": "2026-10-16"
   },
   {
-    "north": "AKQ32", "south": "54", "goal": "expected", "score": 43630840,
-    "source": "Hand derivation: 5 on 3-3, 4 on 4-2, 3 otherwise", "checked": "2026-10-16"
-  },
-  {
     "north": "AQ3", "south": "42", "goal": 2, "score": 5218864, "leads": ["A"],
     "source": "Hand derivation: K onside (half) plus East's singleton K, C(18,6); cash the A first",
     "checked": "2026-10-16"
   },
   {
-    "north": "AQ3", "south": "42", "goal": "expected", "score": 15619464,
-    "source": "Hand derivation: two tricks on the layouts above, one otherwise", "checked": "2026-10-16"
-  },
-  {
     "north": "AJ52", "south": "K76", "goal": 3, "score": 8013630,
     "source": "Hand derivation: 3-3, West long 4-2, 2-4 with the Q West, 5-1 West long, Q singleton West, 6-0 West",
     "checked": "2026-10-16"
-  },
-  {
-    "north": "A8", "south": "JT62", "goal": "expected", "value": 1.651, "tolerance": 0.0005,
-    "source": "This project, tests/solver.rs expected_brackets_the_exact_search; exact search, not independent",
-    "checked": "2026-10-16",
-    "note": "Falsecard case: the combined target line gets 1.644, the exact search 1.651"
   },
   {
     "north": "AQ2", "south": "543", "goal": 2, "score": 5250688,
@@ -410,55 +387,5 @@
     "north": "AKQJT98765432", "south": "-", "goal": 13, "score": 10400600,
     "source": "Hand derivation: every card of the suit, nothing missing",
     "checked": "2026-10-18"
-  },
-  {
-    "north": "AQ2", "south": "543", "goal": "expected", "east": "K", "score": 5704180, "total": 5200300,
-    "source": "Hand derivation: the A always takes a trick, and three rounds cannot exhaust seven missing cards, so at most two; duck a round, then the A drops East's singleton or doubleton K: C(19, 7) + 6 C(19, 8) deals take the second trick. That line is optimal for both targets, so the expected tricks are their sum",
-    "checked": "2026-10-18"
-  },
-  {
-    "north": "AQ2", "south": "543", "goal": "expected", "vacant": [13, 7], "score": 104665, "total": 77520,
-    "source": "Hand derivation: as the target case, the A always and the second trick on West's K or East's singleton K: C(19, 6) + C(13, 1) of C(20, 7); the A, then the finesse, is optimal for both targets",
-    "checked": "2026-10-18"
-  },
-  {
-    "north": "AQ2", "south": "543", "goal": "expected", "hcp": [[0, 10], [0, 2]], "score": 5704180, "total": 5200300,
-    "source": "Hand derivation: at most 2 HCP leaves West without the K, the layouts of the K known with East, so its expected tricks: C(25, 12) + C(19, 7) + 6 C(19, 8) over C(25, 12)",
-    "checked": "2026-10-18"
-  },
-  {
-    "north": "AKJ98", "south": "76543", "goal": "expected", "length": [[0, 13], [0, 1]], "score": 24857434, "total": 5200300,
-    "source": "Hand derivation: only the Q can beat declarer, so four tricks always; the fifth when West holds one card (the A drops a singleton Q, else finesse East's Qx): 3 C(23, 12) of C(23, 13) + 3 C(23, 12). Finessing loses nothing four tricks need",
-    "checked": "2026-10-18"
-  },
-  {
-    "north": "AQJT", "south": "32", "goal": "expected", "first": "N", "entries": [null, 1], "score": 31705680, "total": 10400600,
-    "source": "Hand derivation: only the K can beat declarer and North has unlimited entries, so three tricks always; the fourth on West's K or Kx by the finesse with South's one lead, then the A: C(19, 12) + 6 C(19, 11). That line keeps three tricks",
-    "checked": "2026-10-18"
-  },
-  {
-    "north": "KQT32", "south": "654", "goal": "expected", "rounds": 2, "score": 10400600, "total": 10400600,
-    "source": "Hand derivation: in two rounds the A takes one, and leading toward the KQ twice wins the other whether the A rises or ducks: exactly one trick",
-    "checked": "2026-10-18"
-  },
-  {
-    "north": "AKQ2", "south": "543", "goal": "expected", "lead": "2", "score": 31201800, "total": 10400600,
-    "source": "Hand derivation: the 2 led first loses to any of the six missing cards (all above the 5), then the A, K, Q win the other three rounds: exactly three tricks",
-    "checked": "2026-10-18"
-  },
-  {
-    "north": "AKQ32", "south": "54", "goal": "expected", "discard": "2", "score": 34896920, "total": 10400600,
-    "source": "Hand derivation: AKQ3 opposite 54 with six cards missing: the A, K, Q always, the 3 on a 3-3 split, 20 C(20, 10)",
-    "checked": "2026-10-18"
-  },
-  {
-    "north": "AKQ", "south": "432", "goal": "expected", "ruffs": [0, 1, 0, 0], "score": 29234730, "total": 10400600,
-    "source": "Hand derivation: East's one ruff costs at most one of the A, K, Q, so two tricks always; the third when East holds three or more cards and cannot ruff in three rounds: sum over e >= 3 of C(7, e) C(19, 13 - e)",
-    "checked": "2026-10-18"
-  },
-  {
-    "north": "KQT32", "south": "654", "goal": "expected", "ruffs": [0, 1, 0, 1], "value": 1.6300, "tolerance": 0.00005,
-    "source": "SuitC User Guide 9, pp. 2-3: its per-class table with one ruff each gives one trick always and two on 63.0000 percent, the optimum for two tricks; the A and the defenders' ruffs leave declarer at most two tricks",
-    "checked": "2026-10-18", "note": "Decoded from the published table, as the 63 percent target case"
   }
 ]

@@ -5,8 +5,8 @@ See the [calculator comparison](docs/suit-calculator-research.md) and
 
 Single-dummy suit-combination solver for contract bridge, plus a browser
 trainer built on it.  Given North's and South's cards in one suit, it finds
-the line of play that is best for a goal — at least *N* tricks, or the most
-tricks on average — against defenders who see all four hands.
+the line of play that is best for at least *N* tricks against defenders who
+see all four hands, and compares every line at matchpoints or IMPs.
 
 The search is exact: each information state carries the Pareto antichain of
 "tricks per layout" vectors some continuation guarantees, so the answer is the
@@ -15,10 +15,9 @@ wrong whenever a falsecard spreads one layout over several branches).
 Layouts are weighted by vacant places, so every probability is an exact
 fraction over C(26, 13).
 
-The most tricks on average (`Goal::ExactExpected`) is a game of its own: the
-defence minimizes tricks, not one target's chances, so its line is no
-combination of the targets' lines.  It searches the full "tricks per
-layout" vectors, which can take seconds.
+Expected tricks is not a goal: it is neither matchpoints nor IMPs, so it
+says nothing about a real board.  Lines are compared under a scoring
+instead (`Solver::compare`).
 
 Assumptions, as in Pavlicek's card-combination tables: unlimited entries to
 both hands, no ruffs, no inference about the enemy hands, only tricks in this
@@ -33,15 +32,15 @@ fixed first card, discards and ruffs.
 
 ```rust
 use contract_bridge::Holding;
-use suit_combination::{analyze, Goal};
+use suit_combination::analyze;
 
 let north: Holding = "AJ52".parse().unwrap();
 let south: Holding = "K76".parse().unwrap();
-let a = analyze(north, south, Goal::Tricks { target: 3 }).unwrap();
+let a = analyze(north, south, 3).unwrap();
 println!("{:.1}%\n{}", a.value() * 100.0, a.plan); // 77.1%, then the line
 ```
 
-`analyze_all` solves every target and `Goal::ExactExpected` in one pass.
+`analyze_all` solves every target in one pass.
 `Solver` keeps the memo across goals, and `Game` plays the suit out on it
 trick by trick: `moves` scores each card declarer may play now, and `play`
 plays one and lets the engine's defenders answer.  The `serde` feature derives
@@ -78,8 +77,8 @@ and `best`: the smallest set of lines that beat or tie every line outside
 it.  One line there is the best; more mean no single best line, as
 preference can go round in a cycle (`AJ98 / K32` at matchpoints).  Lines
 treat cards declarer cannot yet tell apart alike, as the rest of the engine
-does.  That loses nothing for a target or expected tricks, but at MP or IMPs
-a line telling them apart can take a trick more on a layout:
+does.  That loses nothing for a target, but at MP or IMPs a line telling
+them apart can take a trick more on a layout:
 `32 / KT864`, reacting to East's 7 and 9 differently once the 8 is gone.
 The CLI takes `mp` and `imps CONTRACT NEED [--vulnerable]`, e.g.
 `solve Q543 AT2 imps 3N 2 --vulnerable`.
@@ -88,21 +87,22 @@ A search can be given a budget.  `Solver::set_interrupt` takes a callback
 that is polled every 1024 or so states searched, with the number of states
 memoized; once it returns `true`, `analyze` fails with
 `Error::Interrupted { bound, total }`.  No line is known then, but none scores more
-than `bound`: each target's score where its search finished, else what
-declarer would make seeing all four hands (double dummy), summed over targets
-for expected tricks.  The memo keeps only finished work, so asking again on
+than `bound`: the target's score where its search finished, else what
+declarer would make seeing all four hands (double dummy); a comparison's
+bound is that summed over every target.  The memo keeps only finished
+work, so asking again on
 the same `Solver` goes on from where it stopped, and gives exactly what an
 uninterrupted search gives.  The library has no clock: the caller's callback
 reads one.  `Game` never polls it.
 
 ```rust
 use std::time::{Duration, Instant};
-use suit_combination::{Error, Goal, Solver};
+use suit_combination::{Error, Solver};
 
 let mut solver = Solver::new("KQ85".parse().unwrap(), "T73".parse().unwrap()).unwrap();
 let deadline = Instant::now() + Duration::from_secs(1);
 solver.set_interrupt(move |_states| Instant::now() >= deadline);
-match solver.analyze(Goal::Tricks { target: 2 }) {
+match solver.analyze(2) {
     Ok(a) => println!("{:.1}%", a.value() * 100.0),
     Err(Error::Interrupted { bound, .. }) => println!("at most {bound} of 10400600"),
     Err(e) => panic!("{e}"),
@@ -116,7 +116,7 @@ the thread or worker for a hard stop.
 ```sh
 cargo run --release --example solve -- AJ52 K76      # all goals
 cargo run --release --example solve -- AQ3 42 2      # one target
-cargo run --release --example solve -- A943 QT2 ev    # expected tricks
+cargo run --release --example solve -- AQT98 5432 mp  # every line at matchpoints
 cargo run --release --example solve -- KQ85 T73 --budget 1  # each goal 1 s
 ```
 
@@ -154,11 +154,11 @@ unequally likely to reach here.  So the trainer grades the line's own card
 right too.
 
 `analyse.html` analyses one combination without playing it: cards and
-every `Constraints` field, all trick targets and expected tricks at once,
-every first card, each line in words, as a tree, and as an explorer where
-you pick any defender reply, and what it guarantees on every layout.
-Expected tricks has a tab of its own with every line on the Pareto front
-compared at matchpoints or IMPs (`Solver::compare`): trick distribution,
+every `Constraints` field, all trick targets at once, every first card,
+each line in words, as a tree, and as an explorer where you pick any
+defender reply, and what it guarantees on every layout.  A tab of its own
+has every line on the Pareto front compared at matchpoints or IMPs
+(`Solver::compare`): trick distribution,
 gains against a chosen line, the best line or the cycle, and two lines
 side by side layout by layout.  The problem lives in the URL hash as JSON,
 so "Copy link" shares it; "JSON" downloads it with every result.  The bridge
@@ -168,7 +168,7 @@ finesse, a duck, letting a card run.
 
 Every goal shows its value as it arrives, or interrupted with the bound no
 line beats.  The worker answers in slices of 300 ms
-(`Trainer::set_budget`, `Trainer::target(k)`, `Trainer::expected()`;
+(`Trainer::set_budget`, `Trainer::target(k)`, `Trainer::compare(scoring)`;
 an interrupted call returns `{interrupted: true, bound}` and keeps its memo),
 so a combination you enter solves the goal you ask for first, then the
 others, showing the time spent meanwhile.  Play starts once your goal is done
@@ -198,10 +198,10 @@ antichains small.  Only the best vector counts in the end, so a narrow
 search first finds a good line, and the exact search then drops every
 vector that already loses more deals than that line.  The hardest
 combinations known, such as `KQ85` opposite `T73` and `KJ9753` opposite a
-void, take under a second per target.  `Goal::ExactExpected` needs the
-full vectors: about a second on those, but about fifteen seconds on
-`KJ9753` opposite a void, where the trainer shows only a bound.  The web
-trainer runs the solver in a worker, so
+void, take under a second per target.  `Solver::compare` needs the full
+vectors and a plan for every line on the front: about a second on those,
+but on `KJ9753` opposite a void longer than the page waits, and it says
+so.  The web trainer runs the solver in a worker, so
 the page stays responsive; a random deal is abandoned after two seconds and
 another dealt, and a combination you enter yourself searches ten seconds at a
 time until it finishes or you stop it.  When a search is interrupted its bound comes from

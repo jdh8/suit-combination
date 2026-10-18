@@ -23,8 +23,8 @@ targets; double-dummy averages are upper bounds, not policies.
 ## Milestones
 
 1. **Core parity:** independently checked single-dummy results and playable
-   lines for trick targets and exact expected tricks, with usable response
-   times and inspectable explanations.
+   lines for trick targets, with usable response times and inspectable
+   explanations.
 2. **Product parity:** the leaders' constraints, line comparison, MP/IMP
    scoring and problem coverage.
 
@@ -32,15 +32,15 @@ targets; double-dummy averages are upper bounds, not policies.
 
 | Capability | Today ([lib.rs](../src/lib.rs), [tests](../tests/solver.rs), [wasm](../web/src/lib.rs), [app.js](../web/app.js), [CLI](../examples/solve.rs)) | Gap |
 | --- | --- | --- |
-| Hidden-card analysis | Pareto vectors keep one strategy across indistinguishable layouts; targets (0/1 vectors) and `ExactExpected` are exhaustive | Little independent validation |
-| Expected tricks | `ExactExpected`, the exact search, is the one EV goal (the fast target-line mode was retired in phase 4) | — |
+| Hidden-card analysis | Pareto vectors keep one strategy across indistinguishable layouts; targets (0/1 vectors) and the comparison's full front are exhaustive | Little independent validation |
+| Expected tricks | Dropped 2026-10-18: neither MP nor IMPs, so not a real-board goal; the full-vector search stays as what `Solver::compare` runs on | — |
 | Probabilities | Fixed 13/13 vacant places, `TOTAL = C(26,13)` hard-coded in engine and browser | No vacant places, known cards, length or HCP constraints |
 | Entries and play | Unlimited entries, no ruffs by default; the starting hand, finite entries, round limits, a fixed first card, discards and one side's ruffs (`Constraints`) | No overruffs |
 | Alternative lines | Values for every equivalent opening lead; one plan per goal | No line browser, line-by-layout matrix or comparison |
-| Goals | At-least-N, exact EV, MP/IMP line comparison (`Solver::compare`) | Lines treat cards not yet told apart alike |
+| Goals | At-least-N; MP/IMP line comparison (`Solver::compare`) | Lines treat cards not yet told apart alike |
 | Coverage | Any holding: the limit is 256 layouts after merging interchangeable cards (at most 162 for any holding); only many known cards or an HCP range exceed it (`TooManyMissing`) | Over-limit constraint combinations are rejected, not solved |
 | Interface | Browser trainer, custom holdings, card grading, revealable tree, CLI, serializable Rust API | No analysis-first view, free defender branching, sharing or export |
-| Runtime control | Worker termination; random-deal and exact-EV budgets | No engine budget, retained progress or memory contract |
+| Runtime control | Worker termination; random-deal and comparison budgets | No engine budget, retained progress or memory contract |
 | Validation | 44 reference cases in [tests/fixtures/cases.json](../tests/fixtures/cases.json) (SuitC, Todd, Pavlicek, hand derivations); a policy evaluator ([tests/fixtures.rs](../tests/fixtures.rs)) replays every plan on every layout against every legal defence; a seeded 116-combination corpus run by [examples/bench.rs](../examples/bench.rs); CI runs tests and the corpus | Published numbers exist for few cases (Pavlicek states plays, not percentages); no uncompressed oracle beyond the evaluator; corpus timings from one machine |
 
 `Game::defend` is a heuristic tie-break for the trainer, not a defense proof.
@@ -380,6 +380,21 @@ comparisons should include lines that tell such cards apart is open.
 published MP/IMP and cyclic cases agree under matching assumptions; target
 fixtures still pass.
 
+**Revised 2026-10-18: expected tricks dropped.**  EV is neither MP nor
+IMPs, so it says nothing about a real board; only the two scorings do.
+`Goal` is private now (`Tricks { target }` or `Lines`, the full vectors
+`compare` runs on); `analyze`, `analyze_all` and `Game::new` take a
+target, `Analysis::target` replaces `goal`, `Line::score` is gone and
+lines come by trick distribution (most weight on the most tricks first).
+The CLI's `ev`, the bench's `ev`, the wasm `expected()`, the trainer's EV
+problems and the analysis page's EV headline, lead table and EV column are
+gone; the second tab is "Lines at matchpoints or IMPs" and the comparison
+runs once every target is closed.  The 15 EV fixtures (hand derivations
+of constrained EV, the SuitC 3.43 and 1.63) are removed; the comparison
+fixture against SuitPlay's most-tricks line finds that line from the
+distributions.  Everything else is byte-identical: the target search did
+not change.
+
 ### 5. Trainer becomes an analysis tool
 
 Reuse `Plan`, `Lead` and the renderer. Add an Analyse view exposing the
@@ -396,15 +411,15 @@ distribution evaluates the same policy as the tree.
 
 **Status 2026-10-18: done.**  `web/analyse.html` takes the cards and every
 `Constraints` field (now `Deserialize`, unknown fields refused; `Scoring`
-too), solves every target and expected tricks in 300 ms slices, then the
-comparison, each shown as it arrives or as interrupted with its bound;
+too), solves every target in 300 ms slices, then the comparison, each
+shown as it arrives or as interrupted with its bound;
 "Keep searching" goes on, Cancel past 100 ms terminates the worker.  Trick
 targets: a chip per target to switch goals, every first card, the line in
 one sentence, as a tree, as an explorer that stops at each defender
 choice and offers every card (and a ruff), and what it makes on every
-layout.  Expected tricks, in its own tab: every first card and the Pareto
-front under matchpoints or IMPs (contract, tricks needed, vulnerability),
-one row per line with EV and P(at least k) for every k, the gain against
+layout.  The lines, in their own tab: the Pareto front under matchpoints
+or IMPs (contract, tricks needed, vulnerability), one row per line with
+P(at least k) for every k, the gain against
 a chosen line, the best line or the cycle; the chosen line's trick
 distribution, words, tree, explorer, and a second line side by side
 layout by layout.  Until the comparison finishes the tab flags the lines

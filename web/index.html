@@ -23,13 +23,6 @@
           <option value="9">9 cards</option>
         </select>
       </label>
-      <label>Goal
-        <select id="goalkind">
-          <option value="any">any</option>
-          <option value="tricks">at least N tricks</option>
-          <option value="expected">most tricks on average</option>
-        </select>
-      </label>
       <button id="new" class="primary">New problem</button>
       <span class="boardinfo" id="info"></span>
       <button id="cancel" class="secondary hidden">Cancel</button>
@@ -42,7 +35,7 @@
       <div class="controls">
         <label>North <input id="c-north" placeholder="AJ52" size="9" autocapitalize="characters"></label>
         <label>South <input id="c-south" placeholder="K76" size="9" autocapitalize="characters"></label>
-        <label>Tricks <input id="c-goal" placeholder="N, or empty = EV" size="14"></label>
+        <label>Tricks <input id="c-goal" placeholder="N" size="14"></label>
         <button id="solve" class="secondary">Set problem</button>
       </div>
     </details>

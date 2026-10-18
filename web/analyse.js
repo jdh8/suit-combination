@@ -1,5 +1,5 @@
 // The analysis page: one combination under constraints, every trick target
-// and expected tricks at once, the lines compared at matchpoints or IMPs,
+// and the lines compared at matchpoints or IMPs,
 // each line as a tree, in words, and as a play explorer where any defender
 // reply can be followed.  The problem lives in the URL hash as JSON, so a
 // link reproduces it.
@@ -52,7 +52,7 @@ const call = (op, args = [], budget = undefined) => new Promise((resolve, reject
 
 // { id, n, s, c (Constraints JSON), max, keys, results: key -> latest answer,
 //   layouts, running, stop, current, since }.  Keys: t3 for three tricks,
-//   ev for expected tricks, cmp for the comparison.
+//   cmp for the comparison.
 let job = null;
 // What is shown: tab, target, scoring, line `a` (and `b` to compare), and
 // the explorer's defender cards so far
@@ -60,12 +60,11 @@ const view = { tab: 'targets', goal: 't1', scoring: { kind: 'matchpoints' }, a: 
 
 const finished = (r) => r !== undefined && !r.interrupted && !r.error;
 const closed = (r) => finished(r) || r?.memory || r?.error !== undefined;
-const goalOf = (key) => (key === 'ev' || key === 'cmp' ? { kind: 'exact_expected' } : { kind: 'tricks', target: Number(key.slice(1)) });
+const goalOf = (key) => Number(key.slice(1));
 
 function solve(j, key) {
-  const [op, args] = key === 'ev' ? ['expected', []]
-    : key === 'cmp' ? ['compare', [JSON.stringify(view.scoring)]]
-      : ['target', [Number(key.slice(1))]];
+  const [op, args] = key === 'cmp' ? ['compare', [JSON.stringify(view.scoring)]]
+    : ['target', [goalOf(key)]];
   return call(op, args, SLICE).then(JSON.parse);
 }
 
@@ -76,11 +75,11 @@ function start({ n, s, c = {}, goal = 't1', tab, scoring }) {
   [n, s] = [normalize(n), normalize(s)];
   const live = (h) => [...h].filter((x) => !(c.discards ?? '').includes(x)).length;
   const max = Math.min(Math.max(live(n), live(s)), c.rounds ?? 13);
-  const keys = [...Array.from({ length: max }, (_, i) => `t${i + 1}`), 'ev', 'cmp'];
+  const keys = [...Array.from({ length: max }, (_, i) => `t${i + 1}`), 'cmp'];
   job = { id: JSON.stringify([n, s, c]), n, s, c, max, keys, results: new Map(), layouts: null, running: false, stop: false, current: null, since: 0 };
   Object.assign(view, {
     goal: keys.includes(goal) && goal.startsWith('t') ? goal : 't1',
-    tab: tab ?? (goal === 'ev' ? 'ev' : 'targets'),
+    tab: tab === 'ev' || goal === 'ev' ? 'lines' : tab ?? 'targets',
     scoring: scoring ?? { kind: 'matchpoints' },
     a: 0,
     b: null,
@@ -109,8 +108,8 @@ async function run(j) {
       if (!open.length) break;
       for (const key of open) {
         if (j.stop || job !== j || performance.now() - j.since >= SESSION) break;
-        // The comparison redoes expected tricks' work over every line
-        if (key === 'cmp' && !closed(j.results.get('ev'))) continue;
+        // The targets show sooner; the comparison's full search is the slow part.
+        if (key === 'cmp' && j.keys.some((k) => k.startsWith('t') && !closed(j.results.get(k)))) continue;
         j.current = key;
         let r;
         try {
@@ -143,7 +142,7 @@ function info(text, error = false) {
   id('info').classList.toggle('error', error);
 }
 
-const label = (key) => (key === 'ev' ? 'EV' : key === 'cmp' ? 'Lines' : `≥${key.slice(1)}`);
+const label = (key) => (key === 'cmp' ? 'Lines' : `≥${key.slice(1)}`);
 
 // The search's progress and its buttons
 function status() {
@@ -156,10 +155,9 @@ function status() {
 // One goal's value, or why there is none yet
 function goalStatus(j, key) {
   const r = j.results.get(key);
-  const goal = goalOf(key);
-  const bound = r?.interrupted && r.bound !== undefined ? ` (≤ ${value(goal, r.bound, total(j))})` : '';
+  const bound = key !== 'cmp' && r?.interrupted && r.bound !== undefined ? ` (≤ ${value(r.bound, total(j))})` : '';
   if (r?.error) return `${label(key)}: ${r.error}`;
-  if (finished(r)) return key === 'cmp' ? `${r.lines.length} lines` : `${label(key)} ${value(goal, r.score, r.total)}`;
+  if (finished(r)) return key === 'cmp' ? `${r.lines.length} lines` : `${label(key)} ${value(r.score, r.total)}`;
   if (j.current === key && j.running) return `${label(key)} solving…${bound}`;
   if (r?.memory) return `${label(key)} out of memory${bound}`;
   if (r?.interrupted) return `${label(key)} interrupted${bound}`;
@@ -272,7 +270,7 @@ function show() {
   for (const b of document.querySelectorAll('#tabs [data-tab]')) b.classList.toggle('active', b.dataset.tab === view.tab);
   // Typing in the scoring inputs is not interrupted by results arriving
   if (id('out').contains(document.activeElement) && document.activeElement.matches('input')) return;
-  id('out').innerHTML = view.tab === 'targets' ? targetsView(j) : evView(j);
+  id('out').innerHTML = view.tab === 'targets' ? targetsView(j) : linesView(j);
   history.replaceState(null, '', `#${encodeURIComponent(JSON.stringify(problem()))}`);
 }
 
@@ -282,26 +280,26 @@ function targetsView(j) {
     .join('');
   const a = j.results.get(view.goal);
   return `<div class="chips">${chips}</div>`
-    + (finished(a) ? analysisView(j, a) + layoutsTable(j, a.goal, [['Makes', a.guarantee]]) : '');
+    + (finished(a) ? analysisView(j, a) + layoutsTable(j, [['Makes', a.guarantee]], a.target) : '');
 }
 
 function leadsTable(a) {
   const best = Math.max(...a.leads.map((l) => l.score));
   const rows = [...a.leads].sort((x, y) => y.score - x.score)
-    .map((l) => `<tr class="${l.score === best ? 'best' : ''}"><td>${l.seat}: ${cardsText(l.cards)}</td><td class="num">${value(a.goal, l.score, a.total)}</td></tr>`)
+    .map((l) => `<tr class="${l.score === best ? 'best' : ''}"><td>${l.seat}: ${cardsText(l.cards)}</td><td class="num">${value(l.score, a.total)}</td></tr>`)
     .join('');
   return `<div class="panel-title">Every first card</div><table class="leads">${rows}</table>`;
 }
 
 // A line's words, its tree, and the explorer
-function lineView(j, plan, goal) {
+function lineView(j, plan) {
   return `<div class="panel-title">The line</div><p class="summary">${headline(plan, j.n, j.s)}</p>
-    <details class="tree"><summary>Every branch</summary><div class="plan"><ul>${planItems(plan, goal, j.n, j.s)}</ul></div></details>
-    ${explorer(j, plan, goal)}`;
+    <details class="tree"><summary>Every branch</summary><div class="plan"><ul>${planItems(plan, j.n, j.s)}</ul></div></details>
+    ${explorer(j, plan)}`;
 }
 
 function analysisView(j, a) {
-  return leadsTable(a) + lineView(j, a.plan, a.goal);
+  return leadsTable(a) + lineView(j, a.plan);
 }
 
 // West's (or East's) share of a layout: whole groups as cards, else how many
@@ -316,12 +314,12 @@ function side(layout, west) {
 }
 
 // Every layout the constraints allow, with what each column guarantees on it
-function layoutsTable(j, goal, columns) {
+function layoutsTable(j, columns, target) {
   const t = total(j);
   const count = (l) => l.west.reduce((s, [, n]) => s + n, 0);
   const rows = j.layouts.map((l, i) => ({ l, i })).filter(({ l }) => l.weight > 0)
     .sort((x, y) => count(x.l) - count(y.l) || y.l.weight - x.l.weight);
-  const cell = (g) => (goal.kind === 'tricks' ? (g >= goal.target ? '✓' : '✗') : g);
+  const cell = (g) => (target !== undefined ? (g >= target ? '✓' : '✗') : g);
   const body = rows.map(({ l, i }) => {
     const cells = columns.map(([, g]) => cell(g[i]));
     return `<tr class="${new Set(cells).size > 1 ? 'diff' : ''}"><td>${side(l, true)}</td><td>${side(l, false)}</td><td class="num">${pct(l.weight, t)}</td>${cells.map((c) => `<td class="num">${c}</td>`).join('')}</tr>`;
@@ -357,13 +355,9 @@ function first(plan) {
   return plan.kind === 'ruff' ? `${plan.seat[0]} ruff` : `${plan.seat[0]} ${cardsText(plan.cards)}`;
 }
 
-function evView(j) {
-  const ev = j.results.get('ev');
+function linesView(j) {
   const cmp = j.results.get('cmp');
-  const goal = goalOf('ev');
-  let html = `<p class="question">${goalStatus(j, 'ev')}</p>`;
-  if (finished(ev)) html += leadsTable(ev);
-  html += `<div class="panel-title">Every line</div>${scoringControls()}`;
+  let html = `<div class="panel-title">Every line</div>${scoringControls()}`;
   if (!finished(cmp)) return `${html}<p class="flag">${goalStatus(j, 'cmp')}: lines not all found yet</p>`;
   const t = cmp.total;
   const a = Math.min(view.a, cmp.lines.length - 1);
@@ -374,20 +368,19 @@ function evView(j) {
   const atLeast = (l, k) => l.tricks.slice(k).reduce((s, w) => s + w, 0);
   const rows = cmp.lines.map((l, i) => `<tr data-line="${i}" class="${i === a ? 'chosen' : ''}">
       <td>${cmp.best.includes(i) ? '★' : ''}</td><td>${i}</td><td>${first(l.plan)}</td>
-      <td class="num">${(l.score / t).toFixed(3)}</td>
       ${ks.map((k) => `<td class="num">${pct(atLeast(l, k), t)}</td>`).join('')}
       <td class="num">${i === a ? '' : `+${gain(cmp.gain[i][a])} −${gain(cmp.gain[a][i])}`}</td>
       <td>${i === a ? '' : `<button class="mini ${i === b ? 'active' : ''}" data-versus="${i}">vs</button>`}</td></tr>`).join('');
   html += `<p class="note">${cmp.best.length === 1 ? `★ line ${cmp.best[0]} beats or ties every other` : `No single best line: ★ lines ${cmp.best.join(', ')} beat each other in a cycle`} at ${imps ? 'IMPs' : 'matchpoints'}.  Click a line to see it.</p>
-    <div class="scroll"><table class="grid lines"><tr><th></th><th>#</th><th>First</th><th class="num">EV</th>${ks.map((k) => `<th class="num">≥${k}</th>`).join('')}<th class="num">vs line ${a}${imps ? ' (IMPs)' : ''}</th><th></th></tr>${rows}</table></div>`;
+    <div class="scroll"><table class="grid lines"><tr><th></th><th>#</th><th>First</th>${ks.map((k) => `<th class="num">≥${k}</th>`).join('')}<th class="num">vs line ${a}${imps ? ' (IMPs)' : ''}</th><th></th></tr>${rows}</table></div>`;
   const line = cmp.lines[a];
   const dist = line.tricks.map((w, k) => (w ? `${k}: ${pct(w, t)}` : '')).filter(Boolean).join(' · ');
-  html += `<div class="panel-title">Line ${a}: ${(line.score / t).toFixed(3)} tricks</div><p>Tricks taken: ${dist}</p>`;
+  html += `<div class="panel-title">Line ${a}</div><p>Tricks taken: ${dist}</p>`;
   if (b !== null) html += `<p>Line ${a} wins ${gain(cmp.gain[a][b])} ${imps ? 'IMPs per deal' : 'of deals'} over line ${b} and loses ${gain(cmp.gain[b][a])}.</p>`;
-  html += lineView(j, line.plan, goal);
+  html += lineView(j, line.plan);
   const columns = [[`Line ${a}`, line.guarantee]];
   if (b !== null) columns.push([`Line ${b}`, cmp.lines[b].guarantee]);
-  return html + layoutsTable(j, goal, columns);
+  return html + layoutsTable(j, columns);
 }
 
 // --- the play explorer --------------------------------------------------------
@@ -432,7 +425,7 @@ function walk(plan, north, south, path) {
   }
 }
 
-function explorer(j, plan, goal) {
+function explorer(j, plan) {
   const { steps, node, hands, choice } = walk(plan, j.n, j.s, view.path);
   const tricks = [];
   for (let i = 0; i < steps.length; i += 4) tricks.push(steps.slice(i, i + 4));
@@ -445,7 +438,7 @@ function explorer(j, plan, goal) {
     if (node.ruff) cards.push('<button class="card small" data-pick="&quot;ruff&quot;">ruff</button>');
     next = `${node.seat} to play: <span class="cards">${cards.join('')}</span>`;
   } else if (node.kind === 'made') {
-    next = goal.kind === 'tricks' ? '<span class="made">✓ made</span>' : '<span class="made">✓ every trick played for is in</span>';
+    next = view.tab === 'targets' ? '<span class="made">✓ made</span>' : '<span class="made">✓ every trick played for is in</span>';
   } else {
     next = '<span class="hopeless">the line gives up here: no layout still played for reaches it</span>';
   }
@@ -472,7 +465,7 @@ function main() {
   spawn();
   id('go').onclick = analyse;
   for (const el of document.querySelectorAll('main > .controls input, #constraints input')) {
-    el.onkeydown = (ev) => { if (ev.key === 'Enter') analyse(); };
+    el.onkeydown = (event) => { if (event.key === 'Enter') analyse(); };
   }
   // One state's merge can hold a slice for minutes (every line of KJ9753
   // opposite a void): past HARD_STOP the worker goes, its memo with it.

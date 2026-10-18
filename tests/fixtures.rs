@@ -4,21 +4,15 @@
 
 use contract_bridge::{Contract, Holding, Rank, Seat};
 use serde::Deserialize;
-use suit_combination::{Analysis, Constraints, Goal, Layout, Plan, Scoring, Solver, TOTAL};
-
-#[derive(Deserialize)]
-#[serde(untagged)]
-enum CaseGoal {
-    Tricks(u8),
-    Expected(String),
-}
+use suit_combination::{Analysis, Constraints, Layout, Plan, Scoring, Solver, TOTAL};
 
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
 struct Case {
     north: String,
     south: String,
-    goal: CaseGoal,
+    /// Trick target
+    goal: u8,
     /// Vacant places of East, West (default 13, 13)
     vacant: Option<[u8; 2]>,
     /// Cards known to be with East, West
@@ -194,7 +188,10 @@ fn follow(plan: &Plan, mut p: Pos) -> u8 {
             let ruffed = (hand == 0 && p.ruffs[at] > 0).then(|| {
                 let mut p = p;
                 p.ruffs[at] -= 1;
-                follow(ruff.as_ref().expect("plan covers the ruff"), p.play(at, RUFF))
+                follow(
+                    ruff.as_ref().expect("plan covers the ruff"),
+                    p.play(at, RUFF),
+                )
             });
             options
                 .into_iter()
@@ -224,7 +221,12 @@ fn weight(missing: u16, west: u16, c: &Constraints) -> u64 {
     }
     let n = u64::from(missing.count_ones());
     let w = u64::from(west.count_ones());
-    let hcp = |m: u16| (11..15).filter(|&r| m >> r & 1 != 0).map(|r| r - 10).sum::<u64>();
+    let hcp = |m: u16| {
+        (11..15)
+            .filter(|&r| m >> r & 1 != 0)
+            .map(|r| r - 10)
+            .sum::<u64>()
+    };
     let held = [[n - w, w], [hcp(missing & !west), hcp(west)]];
     let within = |[lo, hi]: [u8; 2], x: u64| (u64::from(lo)..=u64::from(hi)).contains(&x);
     if (0..2).any(|d| !within(c.length[d], held[0][d]) || !within(c.hcp[d], held[1][d])) {
@@ -274,17 +276,13 @@ fn evaluate(a: &Analysis, c: &Constraints, layouts: &[Layout]) -> u64 {
                 })
                 .expect("every deal has a layout");
             let g = a.guarantee[i];
-            let what = format!("{} / {} {:?} West {west:#x}", a.north, a.south, a.goal);
-            match a.goal {
-                Goal::Tricks { target } => assert_eq!(tricks >= target, g >= target, "{what}"),
-                Goal::ExactExpected => assert_eq!(tricks, g, "{what}"),
-            }
+            let what = format!(
+                "{} / {} {} tricks West {west:#x}",
+                a.north, a.south, a.target
+            );
+            assert_eq!(tricks >= a.target, g >= a.target, "{what}");
         }
-        total += weight
-            * match a.goal {
-                Goal::Tricks { target } => u64::from(tricks >= target),
-                _ => u64::from(tricks),
-            };
+        total += weight * u64::from(tricks >= a.target);
         if west == missing {
             return total;
         }
@@ -315,17 +313,10 @@ fn reference_cases() {
     let mut failures = Vec::new();
     for c in cases() {
         let (n, s) = (holding(&c.north), holding(&c.south));
-        let goal = match c.goal {
-            CaseGoal::Tricks(t) => Goal::Tricks { target: t },
-            CaseGoal::Expected(ref tag) => {
-                assert_eq!(tag, "expected", "{} / {}", c.north, c.south);
-                Goal::ExactExpected
-            }
-        };
         let constraints = c.constraints();
         let mut solver = Solver::with_constraints(n, s, constraints).unwrap();
-        let a = solver.analyze(goal).unwrap();
-        let name = format!("{n} / {s} {goal:?} {constraints:?}");
+        let a = solver.analyze(c.goal).unwrap();
+        let name = format!("{n} / {s} {} tricks {constraints:?}", c.goal);
         let mut fail = |what: String| failures.push(format!("{name}: {what}"));
         let total = c.total.unwrap_or(TOTAL);
         if a.total != total {
@@ -339,12 +330,19 @@ fn reference_cases() {
         if let Some(value) = c.value {
             let tolerance = c.tolerance.unwrap_or(0.00005);
             if (a.value() - value).abs() > tolerance {
-                fail(format!("value {:.5} not within {tolerance} of {value}", a.value()));
+                fail(format!(
+                    "value {:.5} not within {tolerance} of {value}",
+                    a.value()
+                ));
             }
         }
         for lead in c.leads.iter().flatten() {
             if lead_score(&a, lead) != a.score {
-                fail(format!("lead {lead} scores {} < {}", lead_score(&a, lead), a.score));
+                fail(format!(
+                    "lead {lead} scores {} < {}",
+                    lead_score(&a, lead),
+                    a.score
+                ));
             }
         }
         for lead in c.avoid.iter().flatten() {
@@ -361,7 +359,7 @@ fn reference_cases() {
 fn check_plans(north: Holding, south: Holding, c: Constraints) {
     let mut solver = Solver::with_constraints(north, south, c).unwrap();
     for a in &solver.analyze_all().unwrap() {
-        let name = format!("{north} / {south} {:?} {c:?}", a.goal);
+        let name = format!("{north} / {south} {} tricks {c:?}", a.target);
         assert_eq!(evaluate(a, &c, &solver.layouts()), a.score, "{name}");
     }
 }
@@ -393,7 +391,8 @@ fn random_plans_hold_against_every_defence() {
         let declarer = &deck[..13 - missing as usize];
         let north_len = (rand() % (declarer.len() as u64 + 1)) as usize;
         let (n, s) = declarer.split_at(north_len);
-        let bits = |ranks: &[u8]| Holding::from_bits_truncate(ranks.iter().fold(0, |b, r| b | 1 << r));
+        let bits =
+            |ranks: &[u8]| Holding::from_bits_truncate(ranks.iter().fold(0, |b, r| b | 1 << r));
         let (n, s) = (bits(n), bits(s));
         if n.len() < s.len() || s.is_empty() {
             continue;
@@ -422,9 +421,9 @@ enum CaseScoring {
     },
 }
 
-/// The line a comparison case measures the best one against: the most
-/// expected tricks, or of the lines best for a target, the most expected
-/// tricks
+/// The line a comparison case measures the best one against: the one
+/// taking the most tricks on average (SuitPlay's default line), or the
+/// first line in [`Comparison::lines`] order among those best for a target
 #[derive(Deserialize)]
 #[serde(untagged)]
 enum Versus {
@@ -478,31 +477,39 @@ fn comparison_cases() {
         let layouts = solver.layouts();
         // Each line plays as its trick distribution says
         for l in &c.lines {
-            let a = |goal| Analysis {
+            let a = |target| Analysis {
                 north: n,
                 south: s,
-                goal,
-                score: l.score,
+                target,
+                score: 0,
                 leads: Vec::new(),
                 plan: l.plan.clone(),
                 guarantee: l.guarantee.clone(),
                 total: c.total,
             };
             let d = Constraints::default();
-            assert_eq!(evaluate(&a(Goal::ExactExpected), &d, &layouts), l.score, "{name}");
             for k in 1..l.tricks.len() {
                 let want: u64 = l.tricks[k..].iter().sum();
-                let target = Goal::Tricks { target: k as u8 };
-                assert_eq!(evaluate(&a(target), &d, &layouts), want, "{name} {k} tricks");
+                assert_eq!(
+                    evaluate(&a(k as u8), &d, &layouts),
+                    want,
+                    "{name} {k} tricks"
+                );
             }
         }
         assert_eq!(c.best.len() == 1, case.single, "{name}: best {:?}", c.best);
         if let (Some(versus), Some(gain)) = (case.versus, case.gain) {
-            // Lines come most expected tricks first
             let v = match versus {
+                // The line taking the most tricks on average, SuitPlay's
+                // default line
                 Versus::Expected(ref e) => {
                     assert_eq!(e, "expected");
-                    0
+                    let mean = |i: usize| -> u64 {
+                        (c.lines[i].tricks.iter().enumerate())
+                            .map(|(k, &w)| k as u64 * w)
+                            .sum()
+                    };
+                    (0..c.lines.len()).max_by_key(|&i| mean(i)).unwrap()
                 }
                 Versus::Target(k) => {
                     let p = |i: usize| c.lines[i].tricks[usize::from(k)..].iter().sum::<u64>();

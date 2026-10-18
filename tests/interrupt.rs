@@ -5,7 +5,7 @@
 use contract_bridge::Holding;
 use std::sync::Mutex;
 use std::sync::atomic::{AtomicUsize, Ordering};
-use suit_combination::{Analysis, Error, Goal, Solver};
+use suit_combination::{Analysis, Error, Solver};
 
 fn holding(s: &str) -> Holding {
     if s == "-" {
@@ -65,13 +65,9 @@ fn par_map<T: Sync, R: Send>(items: &[T], f: impl Fn(&T) -> R + Sync) -> Vec<R> 
     out.into_iter().map(|(_, r)| r).collect()
 }
 
-/// Every trick target, then expected tricks if `ev`
-fn goals(north: Holding, south: Holding, ev: bool) -> Vec<Goal> {
-    let max = north.len().max(south.len()) as u8;
-    (1..=max)
-        .map(|target| Goal::Tricks { target })
-        .chain(ev.then_some(Goal::ExactExpected))
-        .collect()
+/// Every trick target
+fn targets(north: Holding, south: Holding) -> Vec<u8> {
+    (1..=north.len().max(south.len()) as u8).collect()
 }
 
 /// The next analysis on `solver` stops at the interrupt's `k`-th poll
@@ -104,7 +100,7 @@ fn check_bound(r: Result<Analysis, Error>, best: &Analysis, what: &str) -> bool 
 }
 
 /// Polls of a fresh search for `goal`, one every `every` memo misses
-fn polls(north: Holding, south: Holding, goal: Goal, every: u32) -> usize {
+fn polls(north: Holding, south: Holding, goal: u8, every: u32) -> usize {
     let count = std::rc::Rc::new(std::cell::Cell::new(0));
     let c = std::rc::Rc::clone(&count);
     let mut solver = Solver::new(north, south).unwrap();
@@ -121,7 +117,7 @@ fn polls(north: Holding, south: Holding, goal: Goal, every: u32) -> usize {
 struct Fresh {
     north: Holding,
     south: Holding,
-    goals: Vec<(Goal, Analysis, usize)>,
+    goals: Vec<(u8, Analysis, usize)>,
 }
 
 /// Steps of [`resume`]: the first three polls, then 13ths of the way
@@ -158,9 +154,9 @@ fn resume(f: &Fresh, step: usize, every: u32) -> usize {
 }
 
 /// [`resume`] every step of every combination
-fn resume_all(combos: &[(Holding, Holding)], every: u32, ev: bool) -> usize {
+fn resume_all(combos: &[(Holding, Holding)], every: u32) -> usize {
     let fresh = par_map(combos, |&(north, south)| {
-        let goals: Vec<_> = goals(north, south, ev)
+        let goals: Vec<_> = targets(north, south)
             .into_iter()
             .map(|g| {
                 let best = Solver::new(north, south).unwrap().analyze(g).unwrap();
@@ -194,7 +190,7 @@ fn resumes_small_combinations_exactly() {
     ] {
         combos.push((holding(n), holding(s)));
     }
-    let tried = resume_all(&combos, 1, true);
+    let tried = resume_all(&combos, 1);
     assert!(tried > 3000, "only {tried} interruptions");
 }
 
@@ -203,7 +199,7 @@ fn resumes_small_combinations_exactly() {
 fn resumes_hard_combinations_exactly() {
     // Polled every 1024 states, as by default
     let combos = [("A953", "KJ8"), ("KJ84", "T63")].map(|(n, s)| (holding(n), holding(s)));
-    let tried = resume_all(&combos, 1024, false);
+    let tried = resume_all(&combos, 1024);
     assert!(tried > 100, "only {tried} interruptions");
 }
 
@@ -223,7 +219,7 @@ fn short_budgets_still_finish() {
             solver.set_poll_interval(1);
             200
         };
-        for goal in goals(n, s, true) {
+        for goal in targets(n, s) {
             let best = Solver::new(n, s).unwrap().analyze(goal).unwrap();
             let mut calls = 0;
             let a = loop {
@@ -243,7 +239,7 @@ fn short_budgets_still_finish() {
 
 /// The bound of an analysis interrupted at once: double dummy, since no
 /// target has finished
-fn double_dummy(north: Holding, south: Holding, goal: Goal) -> Option<u64> {
+fn double_dummy(north: Holding, south: Holding, goal: u8) -> Option<u64> {
     let mut solver = Solver::new(north, south).unwrap();
     solver.set_poll_interval(1);
     solver.set_interrupt(|_| true);
@@ -261,7 +257,7 @@ fn double_dummy_bounds_single_dummy() {
     let above: usize = par_map(&combos, |&(n, s)| {
         let mut above = 0;
         let mut solver = Solver::new(n, s).unwrap();
-        for goal in goals(n, s, n.len() + s.len() >= 7) {
+        for goal in targets(n, s) {
             let a = solver.analyze(goal).unwrap();
             if let Some(dd) = double_dummy(n, s, goal) {
                 assert!(dd >= a.score, "{n} {s} {goal:?}: {dd} < {}", a.score);
@@ -275,12 +271,12 @@ fn double_dummy_bounds_single_dummy() {
     assert!(above > 100, "double dummy is rarely above: {above}");
     // A two-way finesse for the queen: double dummy never guesses wrong.
     let (n, s) = (holding("AJ32"), holding("KT54"));
-    let goal = Goal::Tricks { target: 4 };
+    let goal = 4;
     let sd = Solver::new(n, s).unwrap().analyze(goal).unwrap().score;
     assert!(double_dummy(n, s, goal).unwrap() > sd);
     // No guess: AKQ32 opposite 54 makes five tricks on 3-3 either way.
     let (n, s) = (holding("AKQ32"), holding("54"));
-    let goal = Goal::Tricks { target: 5 };
+    let goal = 5;
     let sd = Solver::new(n, s).unwrap().analyze(goal).unwrap().score;
     assert_eq!(double_dummy(n, s, goal), Some(sd));
 }
