@@ -78,17 +78,23 @@ impl Trainer {
     }
 
     /// `suit_combination::Comparison` under `scoring`
-    /// (`suit_combination::Scoring` as JSON), or, out of budget or memory,
-    /// `{interrupted: true, bound, memory}`; the bound is not meaningful here
+    /// (`suit_combination::Scoring` as JSON), with `memory: true` if left
+    /// open for want of memory; or, out of budget or memory before any line
+    /// is found, `{interrupted: true, bound, memory}`; the bound is not
+    /// meaningful here
     pub fn compare(&mut self, scoring: &str) -> Result<String, JsValue> {
         let scoring: Scoring =
             serde_json::from_str(scoring).map_err(|e| err(format!("scoring: {e}")))?;
         self.arm();
         match self.solver.compare(scoring) {
             Ok(c) => {
-                let json = serde_json::to_string(&c).map_err(err);
+                let mut json = serde_json::to_value(&c).map_err(err)?;
+                // Out of memory, going on is no use
+                if c.open && memory() > MEMORY_CAP {
+                    json["memory"] = true.into();
+                }
                 self.comparison = Some(c);
-                json
+                Ok(json.to_string())
             }
             Err(e) => Ok(self.interrupted(e)?.to_string()),
         }
@@ -100,7 +106,7 @@ impl Trainer {
         let line = (self.comparison.as_ref())
             .and_then(|c| c.lines.get(i))
             .ok_or_else(|| err("no such line"))?;
-        serde_json::to_string(&self.solver.line(line)).map_err(err)
+        serde_json::to_string(&line.plan).map_err(err)
     }
 
     /// Stop the next search at the budget or the memory cap

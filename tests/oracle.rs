@@ -1157,10 +1157,18 @@ fn coarse_oracle_agrees_on_line_comparisons() {
                     imps(score(x) - score(y))
                 }
             };
-            let c = Solver::new(n, s).unwrap().compare(scoring).unwrap();
+            let mut solver = Solver::new(n, s).unwrap();
             let name = format!("{} {scoring:?}", name(n, s));
             let mut want: Vec<Vec<u64>> = front.iter().map(dist).collect();
-            let mut got: Vec<Vec<u64>> = c.lines.iter().map(|l| l.tricks.clone()).collect();
+            let mut got: Vec<Vec<u64>> = (solver.front().iter())
+                .map(|g| {
+                    let mut d = vec![0; max + 1];
+                    for (t, l) in g.iter().zip(solver.layouts()) {
+                        d[usize::from(*t)] += l.weight;
+                    }
+                    d
+                })
+                .collect();
             want.sort();
             got.sort();
             if want != got {
@@ -1172,18 +1180,43 @@ fn coarse_oracle_agrees_on_line_comparisons() {
                 let mut it = front.iter().filter(|v| dist(v) == *d);
                 it.next().filter(|_| it.next().is_none())
             };
+            let net = |a: &Vector, b: &Vector| -> i64 {
+                (0..a.len())
+                    .map(|i| {
+                        weights[i] as i64 * (gain(a[i], b[i]) as i64 - gain(b[i], a[i]) as i64)
+                    })
+                    .sum()
+            };
+            let c = solver.compare(scoring).unwrap();
+            // Lines found but off the front may share a distribution with
+            // a line on it
+            let every = solver.front();
+            let find = |l: &suit_combination::Line| {
+                find(&l.tricks).filter(|_| every.contains(&l.guarantee))
+            };
+            let Some(best) = find(&c.lines[0]) else {
+                continue;
+            };
+            // Proven: no line beats it; else some line beats each found
+            let beaten = front.iter().any(|v| net(v, best) > 0);
+            if c.proven == beaten || c.open {
+                fails.push(format!(
+                    "{name}: proven {} open {}, beaten {beaten}",
+                    c.proven, c.open
+                ));
+            }
             for (a, la) in c.lines.iter().enumerate() {
-                for (b, lb) in c.lines.iter().enumerate() {
-                    let (Some(va), Some(vb)) = (find(&la.tricks), find(&lb.tricks)) else {
-                        continue;
-                    };
-                    let w: u64 = (0..va.len()).map(|i| weights[i] * gain(va[i], vb[i])).sum();
-                    if c.gain(a, b) != w {
-                        fails.push(format!(
-                            "{name} gain {a} {b}: engine {} oracle {w}",
-                            c.gain(a, b)
-                        ));
-                    }
+                let Some(va) = find(la) else {
+                    continue;
+                };
+                let w: u64 = (0..va.len())
+                    .map(|i| weights[i] * gain(va[i], best[i]))
+                    .sum();
+                if c.gain(a, 0) != w {
+                    fails.push(format!(
+                        "{name} gain {a} 0: engine {} oracle {w}",
+                        c.gain(a, 0)
+                    ));
                 }
             }
         }

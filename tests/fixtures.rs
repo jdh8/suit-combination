@@ -477,7 +477,7 @@ fn comparison_cases() {
         let layouts = solver.layouts();
         // Each line plays as its trick distribution says
         for l in &c.lines {
-            let plan = solver.line(l);
+            let plan = &l.plan;
             let a = |target| Analysis {
                 north: n,
                 south: s,
@@ -500,26 +500,41 @@ fn comparison_cases() {
         }
         assert_eq!(c.best.len() == 1, case.single, "{name}: best {:?}", c.best);
         if let (Some(versus), Some(gain)) = (case.versus, case.gain) {
+            // Every line, by trick distribution, most on the most tricks first
+            let dist = |g: &Vec<u8>| {
+                let mut d = vec![0u64; c.lines[0].tricks.len()];
+                for (t, l) in g.iter().zip(&layouts) {
+                    d[usize::from(*t)] += l.weight;
+                }
+                d
+            };
+            let mut front: Vec<(Vec<u64>, Vec<u8>)> =
+                solver.front().into_iter().map(|g| (dist(&g), g)).collect();
+            front.sort_by(|(a, _), (b, _)| b.iter().rev().cmp(a.iter().rev()));
             let v = match versus {
                 // The line taking the most tricks on average, SuitPlay's
                 // default line
                 Versus::Expected(ref e) => {
                     assert_eq!(e, "expected");
-                    let mean = |i: usize| -> u64 {
-                        (c.lines[i].tricks.iter().enumerate())
-                            .map(|(k, &w)| k as u64 * w)
-                            .sum()
+                    let mean = |d: &Vec<u64>| -> u64 {
+                        d.iter().enumerate().map(|(k, &w)| k as u64 * w).sum()
                     };
-                    (0..c.lines.len()).max_by_key(|&i| mean(i)).unwrap()
+                    let most = front.iter().map(|(d, _)| mean(d)).max().unwrap();
+                    front.iter().find(|(d, _)| mean(d) == most).unwrap()
                 }
                 Versus::Target(k) => {
-                    let p = |i: usize| c.lines[i].tricks[usize::from(k)..].iter().sum::<u64>();
-                    let most = (0..c.lines.len()).map(p).max().unwrap();
-                    (0..c.lines.len()).find(|&i| p(i) == most).unwrap()
+                    let p = |d: &Vec<u64>| d[usize::from(k)..].iter().sum::<u64>();
+                    let most = front.iter().map(|(d, _)| p(d)).max().unwrap();
+                    front.iter().find(|(d, _)| p(d) == most).unwrap()
                 }
             };
-            let b = c.best[0];
-            assert_eq!([c.gain(b, v), c.gain(v, b)], gain, "{name}");
+            let best = &c.lines[c.best[0]].guarantee;
+            let won = |x: &[u8], y: &[u8]| -> u64 {
+                (0..x.len())
+                    .map(|i| c.weights[i] * c.payoff[usize::from(x[i])][usize::from(y[i])])
+                    .sum()
+            };
+            assert_eq!([won(best, &v.1), won(&v.1, best)], gain, "{name}");
         }
     }
 }

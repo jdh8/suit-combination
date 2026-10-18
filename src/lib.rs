@@ -124,16 +124,6 @@ impl fmt::Display for Error {
 
 impl std::error::Error for Error {}
 
-/// What a search keeps of each layout
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum Goal {
-    /// Whether at least this many tricks are taken: 0/1 vectors
-    Tricks { target: u8 },
-    /// Every trick, for [`Solver::compare`]: full "tricks per layout"
-    /// vectors, which can take seconds
-    Lines,
-}
-
 /// The optimal line as a tree over declarer's observations
 #[derive(Debug, Clone, PartialEq, Eq)]
 #[cfg_attr(feature = "serde", derive(serde::Serialize))]
@@ -231,6 +221,11 @@ pub enum Scoring {
 }
 
 impl Scoring {
+    /// What `x` tricks win over `y`, less what they lose
+    fn net(self, x: u8, y: u8) -> i64 {
+        self.gain(x, y) as i64 - self.gain(y, x) as i64
+    }
+
     /// What line `a`'s `x` tricks in the suit win over line `b`'s `y`:
     /// a deal (matchpoints) or IMPs
     fn gain(self, x: u8, y: u8) -> u64 {
@@ -260,7 +255,7 @@ fn imps(points: i32) -> u64 {
     SCALE.iter().filter(|&&t| points >= t).count() as u64
 }
 
-/// One line of a [`Comparison`]; [`Solver::line`] plays it out
+/// One line of a [`Comparison`]
 #[derive(Debug, Clone, PartialEq, Eq)]
 #[cfg_attr(feature = "serde", derive(serde::Serialize))]
 pub struct Line {
@@ -271,6 +266,9 @@ pub struct Line {
     /// The first card: one of `cards` led from `seat`
     pub seat: Seat,
     pub cards: Holding,
+    /// The line, its first card included: a large tree, so not serialized
+    #[cfg_attr(feature = "serde", serde(skip))]
+    pub plan: Plan,
 }
 
 /// Result of [`Solver::compare`]
@@ -278,9 +276,9 @@ pub struct Line {
 #[cfg_attr(feature = "serde", derive(serde::Serialize))]
 pub struct Comparison {
     pub scoring: Scoring,
-    /// Every line no other line takes as many tricks as on every layout
-    /// and more on one, by trick distribution: most weight on the most
-    /// tricks first, ties by the next count down
+    /// The best line found, then for each other first card the best line
+    /// found with it, by what it gains over the first, most first; and any
+    /// line found beating the first in a cycle
     pub lines: Vec<Line>,
     /// `payoff[x][y]`: what `x` tricks win over `y` on one deal: 1 or 0 at
     /// matchpoints, IMPs at IMPs
@@ -288,11 +286,15 @@ pub struct Comparison {
     /// Weight of each of [`Solver::layouts`] that declarer may face: 0 for
     /// the layouts no line plays for
     pub weights: Vec<u64>,
-    /// The smallest set of lines that beat or tie every line outside it
+    /// `[0]`, or, if the lines found beat each other in a cycle, the
+    /// smallest set of them that beat or tie every listed line outside it
     /// (where `a` beats `b` if [`gain(a, b)`](Self::gain) is more than
-    /// `gain(b, a)`): one line is the best; more mean no single best line,
-    /// as preference can be cyclic.
+    /// `gain(b, a)`)
     pub best: Vec<usize>,
+    /// No line at all beats line 0: a search of every line found none
+    pub proven: bool,
+    /// That search was interrupted; asking again goes on with it
+    pub open: bool,
     /// Weight of every layout: [`TOTAL`] without [`Constraints`]
     pub total: u64,
 }
@@ -308,7 +310,7 @@ impl Comparison {
             .sum()
     }
 
-    /// [`best`](Self::best), from a few rows of gains on a large front
+    /// [`best`](Self::best) when nothing is proven
     fn smith(&self) -> Vec<usize> {
         let n = self.lines.len();
         let ge = |a, b| self.gain(a, b) >= self.gain(b, a);
@@ -709,6 +711,9 @@ const SOUTH: u8 = 2;
 /// each other on the hard cases, 1024 up to 4x slower
 const BEAM: usize = 64;
 
+/// Vectors a merge of [`Solver::banded`] gathers before reducing them
+const MERGE_BATCH: usize = 1 << 16;
+
 /// What a search may leave out of an antichain
 #[derive(Debug, Clone, Copy)]
 enum Cut {
@@ -1086,8 +1091,12 @@ impl std::hash::Hasher for Fx {
 
 type FxMap<K, V> = HashMap<K, V, std::hash::BuildHasherDefault<Fx>>;
 
-/// A search of lines by how they compare with some lines
+/// A search of lines by how they compare with a line
 struct Banded {
+    scoring: Scoring,
+    line: Tricks,
+    /// What a vector may lose, against double dummy, and still gain enough
+    budget: u64,
     /// Per root layout, the tricks at and below which, and at and above
     /// which, every comparison is the same
     lo: Vec<u8>,
@@ -1119,7 +1128,8 @@ pub struct Solver {
     constraints: Constraints,
     /// Layout spaces by live declarer cards
     structures: FxMap<u16, Rc<Structure>>,
-    /// Antichains of tricks per layout, for [`Goal::Lines`], with the
+    /// Antichains of tricks per layout, for [`Solver::front`] and the
+    /// narrow search of [`Solver::compare`], with the
     /// [`Cut::Budget`] they hold
     memo: FxMap<State, (u64, Vec<Tricks>)>,
     /// Antichains of 0/1 per layout by tricks still needed, for trick
@@ -1141,6 +1151,8 @@ pub struct Solver {
     interrupted: bool,
     /// Double-dummy tricks per root layout, once an interrupt needs them
     dd: Option<Rc<[u8]>>,
+    /// The last search for lines beating a line, kept to go on with
+    banded: Option<Banded>,
 }
 
 /// Memo misses between polls of [`Solver::set_interrupt`]'s callback
@@ -1194,6 +1206,7 @@ impl Solver {
             armed: false,
             interrupted: false,
             dd: None,
+            banded: None,
         };
         let root = solver.root();
         // The root has the most live cards, so the finest layout space
@@ -1247,6 +1260,12 @@ impl Solver {
 
     /// Count a memo miss, polling the interrupt when due.  True once it has
     /// fired: the caller returns at once.
+    /// [`tick`](Self::tick), polling the interrupt now
+    fn poll(&mut self) -> bool {
+        self.misses = self.poll_every.saturating_sub(1);
+        self.tick()
+    }
+
     fn tick(&mut self) -> bool {
         if self.armed && !self.interrupted {
             self.misses += 1;
@@ -1340,32 +1359,20 @@ impl Solver {
         }
     }
 
-    /// Some continuation from `st` wins at least `req` tricks per layout
-    fn guarantees(&mut self, st: State, req: &Tricks, len: usize, goal: Goal) -> bool {
+    /// Some continuation from `st` wins at least `req` tricks per layout;
+    /// every nonzero lane of `req` holds the same count on a target's path
+    fn guarantees(&mut self, st: State, req: &Tricks, len: usize) -> bool {
         // A vector covering `req` loses no more than `req` does.
         let s = self.structure(st.live());
         let c = Self::consistent(&st, &s);
-        match goal {
-            Goal::Lines => {
-                let budget = match self.memo.get(&st) {
-                    Some(&(u64::MAX, _)) => u64::MAX,
-                    _ => Self::lost(&self.post(&st, &s), c, Self::cap(&st), req),
-                };
-                let (vs, _) = self.feasible(st, Cut::Budget(budget));
-                vs.iter().any(|v| v.covers(req, len))
-            }
-            // Every nonzero lane of `req` holds the same count on this path.
-            Goal::Tricks { .. } => {
-                let need = (0..len).map(|i| req.get(i)).max().unwrap_or(0);
-                let req: Set = (0..len).filter(|&i| req.get(i) > 0).collect();
-                let budget = match self.memo_t.get(&(st, need)) {
-                    Some(&(u64::MAX, _)) => u64::MAX,
-                    _ => Self::deals(&self.post(&st, &s), c - req),
-                };
-                let (vs, _) = self.feasible_t(st, need, Cut::Budget(budget));
-                vs.iter().any(|v| v.covers(&req, len))
-            }
-        }
+        let need = (0..len).map(|i| req.get(i)).max().unwrap_or(0);
+        let req: Set = (0..len).filter(|&i| req.get(i) > 0).collect();
+        let budget = match self.memo_t.get(&(st, need)) {
+            Some(&(u64::MAX, _)) => u64::MAX,
+            _ => Self::deals(&self.post(&st, &s), c - req),
+        };
+        let (vs, _) = self.feasible_t(st, need, Cut::Budget(budget));
+        vs.iter().any(|v| v.covers(&req, len))
     }
 
     /// The most weight some continuation from `st` makes `target` on after
@@ -1443,7 +1450,7 @@ impl Solver {
             req.set(i, req.get(i) * target);
         }
         let guarantee = (0..structure.len).map(|i| req.get(i)).collect();
-        let then = self.plan(moves[i].0, req, Goal::Tricks { target });
+        let then = self.plan(moves[i].0, req);
         let plan = Plan::Declarer {
             seat: leads[i].seat,
             cards: leads[i].cards,
@@ -1480,91 +1487,308 @@ impl Solver {
             .collect()
     }
 
-    /// Every line on the Pareto front of tricks per layout, compared pair
-    /// by pair under `scoring` (SuitPlay's line comparison), or
-    /// [`Error::Interrupted`] with a bound on the tricks of any line summed
-    /// over deals.  A line off the front does no better against any line
-    /// than the line above it.
+    /// Every line on the Pareto front of tricks per layout, as tricks per
+    /// root layout: the full search, which can take hours, for tests
+    #[doc(hidden)]
+    pub fn front(&mut self) -> Vec<Vec<u8>> {
+        let root = self.root();
+        let s = self.structure(root.live());
+        let (vs, _) = self.feasible(root, Cut::ALL);
+        vs.iter()
+            .map(|v| (0..s.len).map(|i| v.get(i)).collect())
+            .collect()
+    }
+
+    /// The best line under `scoring` (SuitPlay's comparison of lines),
+    /// with the best found for each other first card, or
+    /// [`Error::Interrupted`] if the interrupt fires before any line is
+    /// found.  Once one is, an interrupt leaves [`Comparison::open`].
+    ///
+    /// The lines found by a narrow search after each first card start it;
+    /// the one beating or tying most of them is checked against every
+    /// line, and replaced by what beats it most, until none does.
     pub fn compare(&mut self, scoring: Scoring) -> Result<Comparison, Error> {
         self.armed = self.interrupt.is_some();
         self.misses = 0;
-        let root = self.root();
-        let (vs, _) = self.feasible(root, Cut::ALL);
+        let c = self.compare_lines(scoring);
         self.armed = false;
-        if std::mem::take(&mut self.interrupted) {
-            return Err(Error::Interrupted {
-                bound: (1..=self.max_tricks()).map(|t| self.ceiling(t)).sum(),
-                total: self.total(),
-            });
-        }
+        self.interrupted = false;
+        c
+    }
+
+    fn compare_lines(&mut self, scoring: Scoring) -> Result<Comparison, Error> {
+        // ponytail: a cycle longer than this is left unfinished
+        const ROUNDS: usize = 8;
+        let root = self.root();
         let s = self.structure(root.live());
         let c = Self::consistent(&root, &s);
-        let dist = |v: &Tricks| {
-            let mut tricks = vec![0; usize::from(self.max_tricks()) + 1];
+        let weights: Vec<u64> = (0..s.len)
+            .map(|i| if c.contains(i) { s.weight[i] } else { 0 })
+            .collect();
+        let net = |a: &Tricks, b: &Tricks| -> i64 {
+            c.iter()
+                .map(|i| weights[i] as i64 * scoring.net(a.get(i), b.get(i)))
+                .sum()
+        };
+        let moves = self.declarer_moves(&root, &s);
+        // (first move, tricks per layout, plan once built)
+        let mut found: Vec<(usize, Tricks, Option<Plan>)> = Vec::new();
+        for (k, &(ch, _, _)) in moves.iter().enumerate() {
+            let (vs, _) = self.feasible(ch, Cut::Beam(BEAM));
+            if self.interrupted {
+                return Err(Error::Interrupted {
+                    bound: self.total(),
+                    total: self.total(),
+                });
+            }
+            found.extend(vs.into_iter().map(|v| (k, v, None)));
+        }
+        let mut top = (0..found.len())
+            .max_by_key(|&a| {
+                let wins = found.iter().filter(|b| net(&found[a].1, &b.1) >= 0);
+                (wins.count(), std::cmp::Reverse(a))
+            })
+            .ok_or(Error::BadTarget)?;
+        let (mut proven, mut open) = (false, false);
+        let mut tops = vec![top];
+        for _ in 0..ROUNDS {
+            let Ok(beater) = self.beater(scoring, found[top].1) else {
+                open = true;
+                break;
+            };
+            let Some(z) = beater else {
+                proven = true;
+                break;
+            };
+            let mut b = self.banded.take();
+            let (plan, v) = self.realize(b.as_mut(), root, 0, z);
+            self.banded = b;
+            if self.interrupted {
+                open = true;
+                break;
+            }
+            let Plan::Declarer { cards, .. } = &plan else {
+                unreachable!("a line starts with a lead")
+            };
+            let k = (moves.iter())
+                .position(|&(_, _, m)| m == cards.to_bits())
+                .expect("a first card is a move");
+            top = match found.iter().position(|f| f.1 == v) {
+                Some(i) => i,
+                None => {
+                    found.push((k, v, Some(plan)));
+                    found.len() - 1
+                }
+            };
+            if tops.contains(&top) {
+                break;
+            }
+            tops.push(top);
+        }
+        // The narrow search's lines are memoized: planning them needs no budget.
+        self.armed = false;
+        self.interrupted = false;
+        // The best, any line it was beaten by, and the best of each other
+        // first card against it
+        let mut shown = vec![top];
+        shown.extend(tops.iter().filter(|&&t| t != top));
+        for k in 0..moves.len() {
+            if shown.iter().any(|&i| found[i].0 == k) {
+                continue;
+            }
+            let with = (0..found.len()).filter(|&i| found[i].0 == k);
+            if let Some(i) = with.max_by_key(|&i| net(&found[i].1, &found[top].1)) {
+                shown.push(i);
+            }
+        }
+        shown[1..].sort_by_key(|&i| std::cmp::Reverse(net(&found[i].1, &found[top].1)));
+        let max = self.max_tricks();
+        let mut lines = Vec::new();
+        for i in shown {
+            let (k, v, plan) = &mut found[i];
+            let (ch, at, cards) = moves[*k];
+            let (plan, v) = match plan.take() {
+                Some(plan) => (plan, *v),
+                None => {
+                    let (then, v) = self.realize(None, ch, 0, *v);
+                    (Self::declarer_step(at, cards, then), v)
+                }
+            };
+            let mut tricks = vec![0; usize::from(max) + 1];
             for i in c.iter() {
                 tricks[usize::from(v.get(i))] += s.weight[i];
             }
-            tricks
-        };
-        let mut vs: Vec<(Vec<u64>, Tricks)> = vs.into_iter().map(|v| (dist(&v), v)).collect();
-        vs.sort_by(|(a, _), (b, _)| b.iter().rev().cmp(a.iter().rev()));
-        let lines = vs
-            .iter()
-            .map(|(tricks, v)| {
-                let (at, cards) = self.first(v);
-                Line {
-                    tricks: tricks.clone(),
-                    guarantee: (0..s.len).map(|i| v.get(i)).collect(),
-                    seat: seat(at),
-                    cards: Holding::from_bits_truncate(cards),
-                }
-            })
-            .collect();
-        let max = usize::from(self.max_tricks());
+            lines.push(Line {
+                tricks,
+                guarantee: (0..s.len).map(|i| v.get(i)).collect(),
+                seat: seat(at),
+                cards: Holding::from_bits_truncate(cards),
+                plan,
+            });
+        }
         let mut cmp = Comparison {
             scoring,
             lines,
-            payoff: (0..=max as u8)
-                .map(|x| (0..=max as u8).map(|y| scoring.gain(x, y)).collect())
+            payoff: (0..=max)
+                .map(|x| (0..=max).map(|y| scoring.gain(x, y)).collect())
                 .collect(),
-            weights: (0..s.len)
-                .map(|i| if c.contains(i) { s.weight[i] } else { 0 })
-                .collect(),
-            best: Vec::new(),
+            weights,
+            best: vec![0],
+            proven,
+            open,
             total: s.weight.iter().sum(),
         };
-        cmp.best = cmp.smith();
+        if !proven && !open {
+            cmp.best = cmp.smith();
+        }
         Ok(cmp)
     }
 
-    /// A first card of a line taking at least `v` per root layout
-    fn first(&mut self, v: &Tricks) -> (u8, u16) {
+    /// The way of comparing with `line` (tricks per root layout, clamped as
+    /// [`banded`](Self::banded) does) of the lines beating it by most
+    /// under `scoring`, if any does; `Err` if interrupted.  The search is
+    /// kept in [`banded`](Self::banded), to go on with if asked again and
+    /// for [`realize`](Self::realize).
+    fn beater(&mut self, scoring: Scoring, line: Tricks) -> Result<Option<Tricks>, ()> {
         let root = self.root();
         let s = self.structure(root.live());
-        let &(_, at, cards) = self
-            .declarer_moves(&root, &s)
+        let c = Self::consistent(&root, &s);
+        let max = self.max_tricks();
+        // No line takes more on a layout than double dummy.
+        let dd = self.double_dummy();
+        let most = |r: usize| dd[r].min(max);
+        let top: i64 = c
             .iter()
-            .find(|&&(ch, _, _)| self.guarantees(ch, v, s.len, Goal::Lines))
-            .expect("a vector of the root comes from some lead");
-        (at, cards)
+            .map(|r| s.weight[r] as i64 * scoring.net(most(r), line.get(r)))
+            .sum();
+        if top <= 0 {
+            return Ok(None);
+        }
+        let budget = (top - 1) as u64;
+        let mut b = match self.banded.take() {
+            Some(b) if b.scoring == scoring && b.line == line && b.budget == budget => b,
+            _ => {
+                let (mut lo, mut hi, mut loss) = (Vec::new(), Vec::new(), Vec::new());
+                for r in 0..s.len {
+                    let (t, most) = (line.get(r), most(r));
+                    let net = |x| scoring.net(x, t);
+                    lo.push((0..=max).rev().find(|&x| net(x) == net(0)).unwrap_or(0));
+                    hi.push((0..=max).find(|&x| net(x) == net(max)).unwrap_or(max));
+                    loss.push(
+                        (0..=max)
+                            .map(|x| (net(most) - net(x.min(most))) as u64)
+                            .collect(),
+                    );
+                }
+                Banded {
+                    scoring,
+                    line,
+                    budget,
+                    lo,
+                    hi,
+                    loss,
+                    live: root.live(),
+                    bands: FxMap::default(),
+                    memo: FxMap::default(),
+                }
+            }
+        };
+        let front = self.banded(&mut b, root, 0, budget);
+        self.banded = Some(b);
+        if self.interrupted {
+            return Err(());
+        }
+        let gain = |z: &Tricks| -> i64 {
+            c.iter()
+                .map(|r| s.weight[r] as i64 * scoring.net(z.get(r), line.get(r)))
+                .sum()
+        };
+        Ok(front
+            .into_iter()
+            .map(|z| (gain(&z), z))
+            .filter(|&(g, _)| g > 0)
+            .max_by_key(|&(g, _)| g)
+            .map(|(_, z)| z))
     }
 
-    /// The plan of `line`, a line of [`compare`](Self::compare) on this
-    /// solver; a tree as large as a plan for a target, so built one at a time
-    pub fn line(&mut self, line: &Line) -> Plan {
-        let root = self.root();
-        let s = self.structure(root.live());
-        let mut v = Tricks::ZERO;
-        for (i, &t) in line.guarantee.iter().enumerate() {
-            v.set(i, t);
+    /// A plan from `st`, after `won` tricks, taking at least `req` per
+    /// layout as `b`'s search says some line does (clamped there), or else
+    /// as the narrow search does, and what the plan takes per layout from
+    /// here.  Where `b` asks nothing more, the narrow search's line taking
+    /// the most tricks goes on.
+    fn realize(
+        &mut self,
+        mut b: Option<&mut Banded>,
+        st: State,
+        won: u8,
+        req: Tricks,
+    ) -> (Plan, Tricks) {
+        let s = self.structure(st.live());
+        let c = Self::consistent(&st, &s);
+        let mut req = req;
+        if let Some(b) = b.as_deref_mut() {
+            // At or below the band, every line compares alike.
+            let band = self.band(b, &st, &s, won);
+            for i in c.iter() {
+                if req.get(i) <= band.lo.get(i) {
+                    req.set(i, 0);
+                }
+            }
         }
-        let moves = self.declarer_moves(&root, &s);
-        let &(ch, at, cards) = moves
-            .iter()
-            .find(|&&(ch, _, _)| self.guarantees(ch, &v, s.len, Goal::Lines))
-            .expect("a line of a comparison on this solver");
-        let then = self.plan(ch, v, Goal::Lines);
-        Self::declarer_step(at, cards, then)
+        if (0..s.len).all(|i| req.get(i) == 0) {
+            if b.is_none() || st.is_over() {
+                return (Plan::Made, Tricks::ZERO);
+            }
+            let (vs, _) = self.feasible(st, Cut::Beam(BEAM));
+            let v = vs
+                .into_iter()
+                .max_by_key(|v| v.sum(s.len))
+                .unwrap_or(Tricks::ZERO);
+            return self.realize(None, st, won, v);
+        }
+        if Self::is_declarer_turn(&st) {
+            for (ch, at, cards) in self.declarer_moves(&st, &s) {
+                let front = match b.as_deref_mut() {
+                    Some(b) => self.banded(b, ch, won, b.budget),
+                    None => self.feasible(ch, Cut::Beam(BEAM)).0,
+                };
+                if front.iter().any(|v| v.covers(&req, s.len)) {
+                    let (then, v) = self.realize(b, ch, won, req);
+                    return (Self::declarer_step(at, cards, then), v);
+                }
+            }
+            assert!(self.interrupted, "req is feasible, so some move keeps it");
+            return (Plan::Hopeless, Tricks::ZERO);
+        }
+        let seat_index = (st.leader + st.played) % 4;
+        let mut branches: Vec<(Vec<Option<Rank>>, Plan)> = Vec::new();
+        let mut ruff = None;
+        let mut out = Tricks::ZERO;
+        for i in c.iter() {
+            out.set(i, 127);
+        }
+        for (card, g, ch, w) in self.defender_moves(&st, &s, c) {
+            let map = self.map(&st, &ch);
+            let bonus = u8::from(w);
+            let mut sub_req = Tricks::ZERO;
+            for i in g.iter() {
+                let r = req.get(i).saturating_sub(bonus);
+                if req.get(i) > 0 && r > sub_req.get(map[i]) {
+                    sub_req.set(map[i], r);
+                }
+            }
+            let (sub, v) = self.realize(b.as_deref_mut(), ch, won + bonus, sub_req);
+            for i in g.iter() {
+                out.set(i, out.get(i).min(v.get(map[i]) + bonus));
+            }
+            Self::add_branch(&mut branches, &mut ruff, &s, card, sub);
+        }
+        let plan = Plan::Defender {
+            seat: seat(seat_index),
+            branches,
+            ruff,
+        };
+        (plan, out)
     }
 
     /// Upper bound on the best score for `target` from what an interrupted
@@ -2004,6 +2228,9 @@ impl Solver {
         {
             return v.clone();
         }
+        if self.tick() {
+            return Vec::new();
+        }
         let s = self.structure(st.live());
         let c = Self::consistent(&st, &s);
         let band = self.band(b, &st, &s, won);
@@ -2029,6 +2256,9 @@ impl Solver {
             let mut all = Vec::new();
             for (ch, _, _) in self.declarer_moves(&st, &s) {
                 all.extend(self.banded(b, ch, won, budget));
+                if self.interrupted {
+                    return Vec::new();
+                }
             }
             let mut out = maximal(all, s.len, None);
             out.retain(|v| lost(v) <= budget);
@@ -2043,6 +2273,9 @@ impl Solver {
                 let map = self.map(&st, &ch);
                 let bonus = u8::from(w);
                 let vs = self.banded(b, ch, won + bonus, budget);
+                if self.interrupted {
+                    return Vec::new();
+                }
                 let sub = maximal(
                     vs.iter()
                         .map(|y| {
@@ -2070,13 +2303,25 @@ impl Solver {
             let words = s.len.div_ceil(8);
             let mut acc = vec![start];
             for (mask, sub) in &subs {
-                let mut next = Vec::new();
+                let (mut next, mut kept) = (Vec::new(), 0);
                 for x in &acc {
                     next.extend(maximal(
                         sub.iter().map(|y| x.min_on(y, mask, words)).collect(),
                         s.len,
                         None,
                     ));
+                    // One merge can take minutes: reduce as it doubles,
+                    // and let the interrupt in each time
+                    // ponytail: a reduction itself is not interrupted, 8 s
+                    // on KJ9753 opposite a void; poll inside `undominated`
+                    // if that matters
+                    if next.len() > 2 * kept + MERGE_BATCH {
+                        if self.poll() {
+                            return Vec::new();
+                        }
+                        next = maximal(next, s.len, Some(mask));
+                        kept = next.len();
+                    }
                 }
                 acc = maximal(next, s.len, Some(mask));
                 // Lanes still to merge hold at least their final tricks.
@@ -2086,76 +2331,6 @@ impl Solver {
         };
         b.memo.insert((st, won), (budget, out.clone()));
         out
-    }
-
-    /// Prototype: tricks per root layout of some lines, by a beam search
-    #[doc(hidden)]
-    pub fn beam_lines(&mut self, width: usize) -> Vec<Vec<u8>> {
-        let root = self.root();
-        let s = self.structure(root.live());
-        let (vs, _) = self.feasible(root, Cut::Beam(width));
-        vs.iter()
-            .map(|v| (0..s.len).map(|i| v.get(i)).collect())
-            .collect()
-    }
-
-    /// Prototype: the most any line gains over `line` (tricks per root
-    /// layout) under `scoring`, net of what it loses, if at least `least`,
-    /// and how many ways of comparing with it gain that much
-    #[doc(hidden)]
-    pub fn respond(
-        &mut self,
-        scoring: Scoring,
-        line: &[u8],
-        least: i64,
-    ) -> (Option<i64>, usize, Vec<u8>) {
-        let root = self.root();
-        let s = self.structure(root.live());
-        let max = self.max_tricks();
-        let phi = |x: u8, t: u8| scoring.gain(x, t) as i64 - scoring.gain(t, x) as i64;
-        // No line takes more on a layout than double dummy.
-        let dd = self.double_dummy();
-        let (mut lo, mut hi) = (vec![0; s.len], vec![0; s.len]);
-        let mut loss = Vec::new();
-        for (r, &t) in line.iter().enumerate() {
-            let most = dd[r].min(max);
-            lo[r] = (0..=max).rev().find(|&x| phi(x, t) == phi(0, t)).unwrap();
-            hi[r] = (0..=max).find(|&x| phi(x, t) == phi(max, t)).unwrap();
-            loss.push(
-                (0..=max)
-                    .map(|x| (phi(most, t) - phi(x.min(most), t)) as u64)
-                    .collect(),
-            );
-        }
-        let c = Self::consistent(&root, &s);
-        let top: i64 = c
-            .iter()
-            .map(|r| s.weight[r] as i64 * phi(dd[r].min(max), line[r]))
-            .sum();
-        if least > top {
-            return (None, 0, Vec::new());
-        }
-        let mut b = Banded {
-            lo,
-            hi,
-            loss,
-            live: root.live(),
-            bands: FxMap::default(),
-            memo: FxMap::default(),
-        };
-        let front = self.banded(&mut b, root, 0, (top - least) as u64);
-        let gain = |z: &Tricks| -> i64 {
-            c.iter()
-                .map(|r| s.weight[r] as i64 * phi(z.get(r), line[r]))
-                .sum()
-        };
-        let best = front.iter().max_by_key(|z| gain(z));
-        let n = front.iter().filter(|z| gain(z) >= least).count();
-        (
-            best.map(gain).filter(|&g| g >= least),
-            n,
-            best.map_or(Vec::new(), |z| (0..s.len).map(|i| z.get(i)).collect()),
-        )
     }
 
     /// `vs` cut to a [`Cut::Beam`]'s width, those losing least first
@@ -2241,7 +2416,7 @@ impl Solver {
 
     /// A continuation from `st` that wins at least `req` tricks per layout
     /// (requires `req` to be covered by some feasible vector of `st`)
-    fn plan(&mut self, st: State, req: Tricks, goal: Goal) -> Plan {
+    fn plan(&mut self, st: State, req: Tricks) -> Plan {
         let s = self.structure(st.live());
         if (0..s.len).all(|i| req.get(i) == 0) {
             return Plan::Made;
@@ -2249,8 +2424,8 @@ impl Solver {
         let c = Self::consistent(&st, &s);
         if Self::is_declarer_turn(&st) {
             for (ch, at, cards) in self.declarer_moves(&st, &s) {
-                if self.guarantees(ch, &req, s.len, goal) {
-                    let then = self.plan(ch, req, goal);
+                if self.guarantees(ch, &req, s.len) {
+                    let then = self.plan(ch, req);
                     return Self::declarer_step(at, cards, then);
                 }
             }
@@ -2270,7 +2445,7 @@ impl Solver {
                 sub_req.set(map[i], sub_req.get(map[i]).max(r));
             }
             let sub = if wanted {
-                self.plan(ch, sub_req, goal)
+                self.plan(ch, sub_req)
             } else {
                 Plan::Hopeless
             };

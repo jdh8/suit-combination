@@ -6,7 +6,7 @@ See the [calculator comparison](docs/suit-calculator-research.md) and
 Single-dummy suit-combination solver for contract bridge, plus a browser
 trainer built on it.  Given North's and South's cards in one suit, it finds
 the line of play that is best for at least *N* tricks against defenders who
-see all four hands, and compares every line at matchpoints or IMPs.
+see all four hands, and the best line at matchpoints or IMPs.
 
 The search is exact: each information state carries the Pareto antichain of
 "tricks per layout" vectors some continuation guarantees, so the answer is the
@@ -71,13 +71,21 @@ and `--entries NORTH,SOUTH` such as `-,1` (`-` for unlimited), `--rounds N`,
 `Scoring::Matchpoints` counts how often one line takes more tricks than
 another, whatever the margin; `Scoring::Imps { contract, vulnerable, need }`
 counts the IMPs won (WBF scale) in a contract made with `need` tricks in the
-suit.  It returns every line on the Pareto front of tricks per layout, each
-with its trick distribution, tricks per layout and first card,
-`Comparison::gain(a, b)` for what one line gains over another, and `best`: the smallest set of lines that beat or tie every line outside
-it.  One line there is the best; more mean no single best line, as
-preference can go round in a cycle (`AJ98 / K32` at matchpoints).
-`Solver::line` builds one line's plan: plans are trees, so building one for
-each of thousands of lines took gigabytes.  Lines
+suit.  There can be millions of lines no other line beats on every layout
+(`KJ9753` opposite a void), so it does not list them.  It returns the best
+line, then for each other first card the best line found with it, each
+with its trick distribution, tricks per layout, first card and plan, and
+`Comparison::gain(a, b)` for what one line gains over another.
+`proven` says no line at all beats the first: the narrow search's lines
+after each first card start, the one beating or tying most of them is
+checked against every line, and is replaced by what beats it most until
+nothing does.  That check keeps, per layout, only whether a line takes
+fewer, as many or more tricks than the line checked (at IMPs, where the
+IMPs change), and drops any line that cannot beat it even taking
+double-dummy tricks everywhere else.  An interrupted check leaves the
+comparison `open`; asking again goes on.  Preference can go round in a
+cycle (`AJ98 / K32` at matchpoints): `best` then lists the lines found
+that beat each other.  Lines
 treat cards declarer cannot yet tell apart alike, as the rest of the engine
 does.  That loses nothing for a target, but at MP or IMPs a line telling
 them apart can take a trick more on a layout:
@@ -118,7 +126,7 @@ the thread or worker for a hard stop.
 ```sh
 cargo run --release --example solve -- AJ52 K76      # all goals
 cargo run --release --example solve -- AQ3 42 2      # one target
-cargo run --release --example solve -- AQT98 5432 mp  # every line at matchpoints
+cargo run --release --example solve -- AQT98 5432 mp  # the best line at matchpoints
 cargo run --release --example solve -- KQ85 T73 --budget 1  # each goal 1 s
 ```
 
@@ -159,9 +167,9 @@ right too.
 every `Constraints` field, all trick targets at once, every first card,
 each line in words, as a tree, and as an explorer where you pick any
 defender reply, and what it guarantees on every layout.  A tab of its own
-has every line on the Pareto front compared at matchpoints or IMPs
-(`Solver::compare`): trick distribution,
-gains against a chosen line, the best line or the cycle, and two lines
+has the best line at matchpoints or IMPs (`Solver::compare`), proven or
+the best found so far, and the best with each other first card: trick
+distribution, gains against a chosen line, the cycle if there is one, and two lines
 side by side layout by layout.  The problem lives in the URL hash as JSON,
 so "Copy link" shares it; "JSON" downloads it with every result.  The bridge
 words (`web/render.js`, checked by `node web/render.test.mjs`) come from
@@ -200,10 +208,12 @@ antichains small.  Only the best vector counts in the end, so a narrow
 search first finds a good line, and the exact search then drops every
 vector that already loses more deals than that line.  The hardest
 combinations known, such as `KQ85` opposite `T73` and `KJ9753` opposite a
-void, take under a second per target.  `Solver::compare` needs the full
-vectors: under a second for the 3,880 lines of `KJ9753` opposite the 2,
-but `KJ9753` opposite a void and `KQ85` opposite `T73` do not finish in
-five minutes, and the page says so.  The web trainer runs the solver in a worker, so
+void, take under a second per target.  `Solver::compare` proves the best
+line on `KJ9753` opposite the 2 (3,880 undominated lines) in 0.3 s and on
+`KQ85` opposite `T73` in 0.15 s; `KJ97` opposite `53` ends in a cycle of
+lines found after 19 s.  On `KJ9753` opposite a void it shows the best
+line found but cannot prove it: the check's first trick keeps half a
+million ways to compare and does not finish, and the page says so.  The web trainer runs the solver in a worker, so
 the page stays responsive; a random deal is abandoned after two seconds and
 another dealt, and a combination you enter yourself searches ten seconds at a
 time until it finishes or you stop it.  When a search is interrupted its bound comes from

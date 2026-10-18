@@ -44,9 +44,14 @@ const USAGE: &str = "usage: solve NORTH SOUTH [TARGET|mp|imps CONTRACT NEED] [--
     [--first N|S] [--entries NORTH,SOUTH] [--rounds N] [--lead CARD] [--discard CARDS] \
     [--ruffs N,E,S,W]";
 
-/// Prints the lines of `c`, the best, and what it gains over each other
-fn compared(solver: &mut Solver, c: &Comparison) {
+/// Prints the lines of `c`, the best, and what each other gains over it
+fn compared(c: &Comparison) {
     let per = |x: u64| x as f64 / c.total as f64;
+    let unit = match c.scoring {
+        Scoring::Matchpoints => "% of deals",
+        Scoring::Imps { .. } => "IMPs per deal",
+    };
+    let scale = if unit.starts_with('%') { 100.0 } else { 1.0 };
     for (i, l) in c.lines.iter().enumerate() {
         let (seat, cards) = (l.seat, l.cards);
         let tricks: Vec<String> = l
@@ -58,25 +63,21 @@ fn compared(solver: &mut Solver, c: &Comparison) {
             "line {i}: lead {cards} from {seat:?}, % by tricks {}",
             tricks.join(" ")
         );
+        if i > 0 {
+            println!(
+                "  vs line 0: wins {:.4}, loses {:.4} {unit}",
+                per(c.gain(i, 0)) * scale,
+                per(c.gain(0, i)) * scale
+            );
+        }
     }
-    let [b] = c.best[..] else {
-        println!("no single best line: {:?}", c.best);
-        return;
-    };
-    println!("best: line {b}");
-    let unit = match c.scoring {
-        Scoring::Matchpoints => "% of deals",
-        Scoring::Imps { .. } => "IMPs per deal",
-    };
-    for i in (0..c.lines.len()).filter(|&i| i != b) {
-        let scale = if unit.starts_with('%') { 100.0 } else { 1.0 };
-        println!(
-            "  vs line {i}: wins {:.4}, loses {:.4} {unit}",
-            per(c.gain(b, i)) * scale,
-            per(c.gain(i, b)) * scale
-        );
+    match (c.proven, c.open, &c.best[..]) {
+        (true, _, _) => println!("best: line 0, and no line beats it"),
+        (_, true, _) => println!("best found: line 0; interrupted before any proof"),
+        (_, _, [_]) => println!("best found: line 0; unproven"),
+        (_, _, best) => println!("no single best line: {best:?} beat each other in a cycle"),
     }
-    println!("{}", solver.line(&c.lines[b]));
+    println!("{}", c.lines[0].plan);
 }
 
 /// Removes `--flag VALUE` from `args`, returning the value
@@ -208,7 +209,7 @@ fn main() {
             solver.set_interrupt(move |_| Instant::now() >= deadline);
         }
         let c = solver.compare(scoring).unwrap_or_else(|e| fail(e));
-        compared(&mut solver, &c);
+        compared(&c);
         return;
     }
     let targets: Vec<u8> = match rest {

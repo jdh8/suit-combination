@@ -59,7 +59,8 @@ let job = null;
 const view = { tab: 'targets', goal: 't1', scoring: { kind: 'matchpoints' }, a: 0, b: null, path: [] };
 
 const finished = (r) => r !== undefined && !r.interrupted && !r.error;
-const closed = (r) => finished(r) || r?.memory || r?.error !== undefined;
+// A comparison still checking its best line is shown but not closed
+const closed = (r) => (finished(r) && !r.open) || r?.memory || r?.error !== undefined;
 const goalOf = (key) => Number(key.slice(1));
 
 function solve(j, key) {
@@ -123,7 +124,7 @@ async function run(j) {
         show();
       }
     }
-    if (job === j) info(j.keys.every((k) => finished(j.results.get(k))) ? `Solved in ${secs(performance.now() - j.since)}` : '');
+    if (job === j) info(j.keys.every((k) => finished(j.results.get(k)) && !j.results.get(k).open) ? `Solved in ${secs(performance.now() - j.since)}` : '');
   } catch (e) {
     if (job === j) info(e.message, e.message !== 'cancelled');
   } finally {
@@ -157,7 +158,7 @@ function goalStatus(j, key) {
   const r = j.results.get(key);
   const bound = key !== 'cmp' && r?.interrupted && r.bound !== undefined ? ` (≤ ${value(r.bound, total(j))})` : '';
   if (r?.error) return `${label(key)}: ${r.error}`;
-  if (finished(r)) return key === 'cmp' ? `${r.lines.length} lines` : `${label(key)} ${value(r.score, r.total)}`;
+  if (finished(r)) return key === 'cmp' ? (r.proven ? 'Best line' : r.open ? 'Best line so far' : 'Best line found') : `${label(key)} ${value(r.score, r.total)}`;
   if (j.current === key && j.running) return `${label(key)} solving…${bound}`;
   if (r?.memory) return `${label(key)} out of memory${bound}`;
   if (r?.interrupted) return `${label(key)} interrupted${bound}`;
@@ -368,8 +369,8 @@ function linePlan(j, cmp, a) {
 
 function linesView(j) {
   const cmp = j.results.get('cmp');
-  let html = `<div class="panel-title">Every line</div>${scoringControls()}`;
-  if (!finished(cmp)) return `${html}<p class="flag">${goalStatus(j, 'cmp')}: lines not all found yet</p>`;
+  let html = `<div class="panel-title">The best line and the best with each other first card</div>${scoringControls()}`;
+  if (!finished(cmp)) return `${html}<p class="flag">${goalStatus(j, 'cmp')}: no line found yet</p>`;
   const t = cmp.total;
   const a = Math.min(view.a, cmp.lines.length - 1);
   const b = view.b !== null && view.b < cmp.lines.length && view.b !== a ? view.b : null;
@@ -382,7 +383,12 @@ function linesView(j) {
       ${ks.map((k) => `<td class="num">${pct(atLeast(l, k), t)}</td>`).join('')}
       <td class="num">${i === a ? '' : `+${gain(gainOf(cmp, i, a))} −${gain(gainOf(cmp, a, i))}`}</td>
       <td>${i === a ? '' : `<button class="mini ${i === b ? 'active' : ''}" data-versus="${i}">vs</button>`}</td></tr>`).join('');
-  html += `<p class="note">${cmp.best.length === 1 ? `★ line ${cmp.best[0]} beats or ties every other` : `No single best line: ★ lines ${cmp.best.join(', ')} beat each other in a cycle`} at ${imps ? 'IMPs' : 'matchpoints'}.  Click a line to see it.</p>
+  const at = imps ? 'IMPs' : 'matchpoints';
+  const verdict = cmp.proven ? `★ Line 0 is the best at ${at}: no line beats it.`
+    : cmp.best.length > 1 ? `No single best line at ${at}: ★ lines ${cmp.best.join(', ')} beat each other in a cycle.`
+    : cmp.open ? `★ Line 0 is the best found so far at ${at}; still checking whether any line beats it.`
+    : `★ Line 0 is the best found at ${at}, not proven.`;
+  html += `<p class="${cmp.proven ? 'note' : 'flag'}">${verdict}  The others are the best found with each other first card.  Click a line to see it.</p>
     <div class="scroll"><table class="grid lines"><tr><th></th><th>#</th><th>First</th>${ks.map((k) => `<th class="num">≥${k}</th>`).join('')}<th class="num">vs line ${a}${imps ? ' (IMPs)' : ''}</th><th></th></tr>${rows}</table></div>`;
   const line = cmp.lines[a];
   const dist = line.tricks.map((w, k) => (w ? `${k}: ${pct(w, t)}` : '')).filter(Boolean).join(' · ');
