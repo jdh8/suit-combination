@@ -470,7 +470,19 @@ coarse oracle on 81 random combinations at MP and two IMP scorings (237
 proofs agree), and SuitPlay's three examples still agree.  Proven in under
 a second where every line used to be listed; `KQ85 / T73` 0.15 s; `KJ97 /
 53` a cycle in 19 s.  Open: `KJ9753` opposite a void (best found, not
-proven); per-move evaluations in the explorer.
+proven).
+
+Per-card values in the explorer (2026-10-19): `Solver::choices` weighs each
+card declarer may play at a position of a line by the same search, rooted
+there, valuing each layout by the whole line's result: on a root layout
+reaching the position, the least of the line's tricks off it and the
+tricks the way on takes.  Valuing only the deals still possible there was
+tried first and is wrong: one trick into `KQ85 / T73` it valued another
+way on above the proven best line, as the defenders would play otherwise
+earlier.  Checked against the full search at the first card and a trick
+later on four holdings at MP and IMPs.  Milliseconds past the first card;
+the first card of `KJ97 / 53` or `KJ9753` opposite a void runs out of its
+3 s and shows what a narrow search finds.
 
 ### 6. The report
 

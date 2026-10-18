@@ -85,7 +85,12 @@ IMPs change), and drops any line that cannot beat it even taking
 double-dummy tricks everywhere else.  An interrupted check leaves the
 comparison `open`; asking again goes on.  Preference can go round in a
 cycle (`AJ98 / K32` at matchpoints): `best` then lists the lines found
-that beat each other.  Lines
+that beat each other.  `Solver::choices` weighs every card declarer may
+play at a position of a line, as a chess engine's analysis board weighs
+moves: the line with that card and the best way on from it in place of its
+own, against the line, out of every deal, the defenders still playing as
+they would against the line elsewhere.  After a proven best line no card
+is worth more than the line's own.  Lines
 treat cards declarer cannot yet tell apart alike, as the rest of the engine
 does.  That loses nothing for a target, but at MP or IMPs a line telling
 them apart can take a trick more on a layout:
@@ -169,7 +174,9 @@ each line in words, as a tree, and as an explorer where you pick any
 defender reply, and what it guarantees on every layout.  A tab of its own
 has the best line at matchpoints or IMPs (`Solver::compare`), proven or
 the best found so far, and the best with each other first card: trick
-distribution, gains against a chosen line, the cycle if there is one, and two lines
+distribution, gains against a chosen line, the cycle if there is one,
+what each card declarer may play is worth at a position of the explorer
+(click declarer's card there), and two lines
 side by side layout by layout.  The problem lives in the URL hash as JSON,
 so "Copy link" shares it; "JSON" downloads it with every result.  The bridge
 words (`web/render.js`, checked by `node web/render.test.mjs`) come from

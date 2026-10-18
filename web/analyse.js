@@ -8,7 +8,8 @@ import { RANKS, rankOf, cardText, cardsText, rankText, value, planItems, headlin
 
 const id = (x) => document.getElementById(x);
 const SLICE = 300; // ms per call, so each result shows as it comes
-const SESSION = 10000; // ms before the search waits for "keep searching"
+const SESSION = 10000;
+const CHOICES = 3000; // ms to weigh the cards at one position // ms before the search waits for "keep searching"
 const HARD_STOP = 100; // ms a cancelled call may take before the worker is terminated, losing its memo
 const secs = (ms) => `${(ms / 1000).toFixed(1)} s`;
 const pct = (w, total) => `${(w / total * 100).toFixed(2)}%`;
@@ -56,7 +57,7 @@ const call = (op, args = [], budget = undefined) => new Promise((resolve, reject
 let job = null;
 // What is shown: tab, target, scoring, line `a` (and `b` to compare), and
 // the explorer's defender cards so far
-const view = { tab: 'targets', goal: 't1', scoring: { kind: 'matchpoints' }, a: 0, b: null, path: [] };
+const view = { tab: 'targets', goal: 't1', scoring: { kind: 'matchpoints' }, a: 0, b: null, path: [], at: null };
 
 const finished = (r) => r !== undefined && !r.interrupted && !r.error;
 // A comparison still checking its best line is shown but not closed
@@ -85,6 +86,7 @@ function start({ n, s, c = {}, goal = 't1', tab, scoring }) {
     a: 0,
     b: null,
     path: [],
+    at: null,
   });
   run(job);
 }
@@ -292,11 +294,12 @@ function leadsTable(a) {
   return `<div class="panel-title">Every first card</div><table class="leads">${rows}</table>`;
 }
 
-// A line's words, its tree, and the explorer
-function lineView(j, plan) {
+// A line's words, its tree, and the explorer; `cmp` and `a`, line `a` of
+// a comparison, let declarer's cards there be weighed
+function lineView(j, plan, cmp = null, a = null) {
   return `<div class="panel-title">The line</div><p class="summary">${headline(plan, j.n, j.s)}</p>
     <details class="tree"><summary>Every branch</summary><div class="plan"><ul>${planItems(plan, j.n, j.s)}</ul></div></details>
-    ${explorer(j, plan)}`;
+    ${explorer(j, plan, cmp, a)}`;
 }
 
 function analysisView(j, a) {
@@ -397,7 +400,7 @@ function linesView(j) {
   const plan = linePlan(j, cmp, a);
   if (plan === null) html += '<p class="note">Building the line…</p>';
   else if (plan.error !== undefined) html += `<p class="flag">${plan.error}</p>`;
-  else html += lineView(j, plan);
+  else html += lineView(j, plan, cmp, a);
   const columns = [[`Line ${a}`, line.guarantee]];
   if (b !== null) columns.push([`Line ${b}`, cmp.lines[b].guarantee]);
   return html + layoutsTable(j, columns);
@@ -418,7 +421,7 @@ function walk(plan, north, south, path) {
     if (node.kind === 'declarer' || node.kind === 'ruff') {
       const { text, card } = describe(node, trick, out);
       if (node.cards) hands[node.seat] = hands[node.seat].replace(node.cards.at(-1), '');
-      steps.push({ seat: node.seat, card: node.kind === 'ruff' ? 'ruff' : node.cards ? cardsText(node.cards) : '–', text });
+      steps.push({ seat: node.seat, card: node.kind === 'ruff' ? 'ruff' : node.cards ? cardsText(node.cards) : '–', text, raw: card, declarer: true });
       trick = advance(trick, card);
       node = node.then;
     } else if (node.kind === 'defender') {
@@ -436,7 +439,7 @@ function walk(plan, north, south, path) {
         shown = card === 'ruff' ? 'ruff' : rankText(card);
       }
       out.delete(card);
-      steps.push({ seat: node.seat, card: shown });
+      steps.push({ seat: node.seat, card: shown, raw: card });
       trick = advance(trick, card);
       node = sub;
     } else {
@@ -445,12 +448,17 @@ function walk(plan, north, south, path) {
   }
 }
 
-function explorer(j, plan) {
+function explorer(j, plan, cmp = null, a = null) {
   const { steps, node, hands, choice } = walk(plan, j.n, j.s, view.path);
   const tricks = [];
-  for (let i = 0; i < steps.length; i += 4) tricks.push(steps.slice(i, i + 4));
-  const list = tricks.map((t) => `<li>${t.map((s) => `${s.seat[0]} ${s.card}`).join(' · ')}
+  for (let i = 0; i < steps.length; i += 4) tricks.push(steps.slice(i, i + 4).map((s, k) => ({ ...s, i: i + k })));
+  // In a comparison, declarer's cards open what each card there is worth
+  const card = (s) => (cmp && s.declarer
+    ? `<button class="mini ${s.i === view.at ? 'active' : ''}" data-at="${s.i}">${s.seat[0]} ${s.card}</button>`
+    : `${s.seat[0]} ${s.card}`);
+  const list = tricks.map((t) => `<li>${t.map(card).join(' · ')}
     <span class="words">${t.filter((s) => s.text).map((s) => s.text).join('; ')}</span></li>`).join('');
+  const weighed = cmp && steps[view.at]?.declarer ? choicesView(j, cmp, a, steps.slice(0, view.at)) : '';
   let next;
   if (choice) {
     const cards = node.branches.flatMap(([labels]) => labels)
@@ -464,9 +472,38 @@ function explorer(j, plan) {
   }
   return `<div class="panel-title">Explore the line</div>
     <p class="hands">North ${[...hands.North].map(cardText).join('') || '—'} · South ${[...hands.South].map(cardText).join('') || '—'}</p>
-    <ol class="tricks">${list}</ol>
+    <ol class="tricks">${list}</ol>${weighed}
     <p class="next">${next}</p>
     <p>${view.path.length ? '<button class="secondary dark" data-back>Back</button> <button class="secondary dark" data-restart>Restart</button>' : ''}</p>`;
+}
+
+// Every card declarer may play after `before` (steps of line `a`), against
+// the line's own: asked of the worker once, as the comparison's plans are
+function choicesView(j, cmp, a, before) {
+  const plays = before.map((s) => s.raw);
+  if (plays.includes('ruff')) return '<p class="flag">Cards are not weighed after a ruff.</p>';
+  const key = `${a}:${JSON.stringify(plays)}`;
+  cmp.choices ??= {};
+  if (!(key in cmp.choices)) {
+    cmp.choices[key] = null;
+    call('choices', [a, JSON.stringify(plays)], CHOICES).then(JSON.parse, (e) => ({ error: e.message }))
+      .then((r) => { cmp.choices[key] = r; if (job === j) show(); });
+  }
+  const r = cmp.choices[key];
+  if (r === null) return '<p class="note">Weighing every card here…</p>';
+  if (r.error !== undefined) return `<p class="flag">${r.error}</p>`;
+  const imps = cmp.scoring.kind === 'imps';
+  const worth = (c) => {
+    const x = c.net / r.total;
+    const v = imps ? `${x >= 0 ? '+' : '−'}${Math.abs(x).toFixed(3)} IMPs` : `${x >= 0 ? '+' : '−'}${Math.abs(x * 100).toFixed(2)}%`;
+    return c.exact ? v : `${v} or better`;
+  };
+  const rows = [...r.choices].sort((x, y) => y.net - x.net)
+    .map((c) => `<tr class="${c.line ? 'chosen' : ''}"><td>${c.seat}: ${c.cards ? cardsText(c.cards) : 'discard'}${c.line ? ' (the line)' : ''}</td><td class="num">${worth(c)}</td></tr>`)
+    .join('');
+  return `<p class="note">Each card here, then the best way on, in place of the line's, against the line
+    (${imps ? 'IMPs per deal' : 'of all deals'}); the defenders still play as they would against the line elsewhere.</p>
+    <table class="leads">${rows}</table>`;
 }
 
 // --- wiring -----------------------------------------------------------------
@@ -502,23 +539,32 @@ function main() {
     b.onclick = () => {
       view.tab = b.dataset.tab;
       view.path = [];
+      view.at = null;
       show();
     };
   }
   id('out').onclick = (e) => {
-    const t = e.target.closest('[data-goal],[data-pick],[data-back],[data-restart],[data-versus],[data-line]');
+    const t = e.target.closest('[data-goal],[data-pick],[data-back],[data-restart],[data-versus],[data-line],[data-at]');
     if (!t) return;
     const d = t.dataset;
     if (d.goal) {
       view.goal = d.goal;
       view.path = [];
-    } else if (d.pick !== undefined) view.path.push(JSON.parse(d.pick));
-    else if (d.back !== undefined) view.path.pop();
-    else if (d.restart !== undefined) view.path = [];
+    } else if (d.pick !== undefined) {
+      view.path.push(JSON.parse(d.pick));
+      view.at = null;
+    } else if (d.back !== undefined) {
+      view.path.pop();
+      view.at = null;
+    } else if (d.restart !== undefined) {
+      view.path = [];
+      view.at = null;
+    } else if (d.at !== undefined) view.at = Number(d.at) === view.at ? null : Number(d.at);
     else if (d.versus) view.b = Number(d.versus) === view.b ? null : Number(d.versus);
     else if (d.line) {
       view.a = Number(d.line);
       view.path = [];
+      view.at = null;
     }
     show();
   };

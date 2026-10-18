@@ -2,7 +2,7 @@
 //! combination holds the memoized solver, answers the analysis of each goal
 //! as JSON, and plays the suit out trick by trick.
 
-use contract_bridge::Holding;
+use contract_bridge::{Holding, Rank};
 use suit_combination::{Comparison, Constraints, Error, Game, Scoring, Solver};
 use wasm_bindgen::prelude::{JsValue, wasm_bindgen};
 
@@ -107,6 +107,25 @@ impl Trainer {
             .and_then(|c| c.lines.get(i))
             .ok_or_else(|| err("no such line"))?;
         serde_json::to_string(&line.plan).map_err(err)
+    }
+
+    /// Every card declarer may play once `plays` are played along line `i`
+    /// of the last comparison, each against the line's own card:
+    /// `suit_combination::Choices` as JSON.  `plays` is a JSON array of
+    /// ranks (2 to 14), `null` for a discard or showing out.
+    pub fn choices(&mut self, i: usize, plays: &str) -> Result<String, JsValue> {
+        let plays: Vec<Option<u8>> =
+            serde_json::from_str(plays).map_err(|e| err(format!("plays: {e}")))?;
+        let plays = (plays.into_iter())
+            .map(|r| r.map(Rank::try_new).transpose())
+            .collect::<Result<Vec<_>, _>>()
+            .map_err(|_| err("plays: a rank is 2 to 14"))?;
+        self.arm();
+        let Self { comparison, solver, .. } = self;
+        let c = comparison.as_ref().ok_or_else(|| err("no comparison yet"))?;
+        let line = c.lines.get(i).ok_or_else(|| err("no such line"))?;
+        let choices = solver.choices(c.scoring, &line.plan, &plays).map_err(err)?;
+        serde_json::to_string(&choices).map_err(err)
     }
 
     /// Stop the next search at the budget or the memory cap
