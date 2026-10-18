@@ -1086,6 +1086,31 @@ impl std::hash::Hasher for Fx {
 
 type FxMap<K, V> = HashMap<K, V, std::hash::BuildHasherDefault<Fx>>;
 
+/// A search of lines by how they compare with some lines
+struct Banded {
+    /// Per root layout, the tricks at and below which, and at and above
+    /// which, every comparison is the same
+    lo: Vec<u8>,
+    hi: Vec<u8>,
+    /// Per root layout and tricks taken there, what a deal of it loses
+    /// against taking every trick
+    loss: Vec<Vec<u64>>,
+    /// Live cards of the root
+    live: u16,
+    bands: FxMap<(u16, u8), Rc<Band>>,
+    /// Vectors losing at most the budget kept with them, and maybe others
+    memo: FxMap<(State, u8), (u64, Vec<Tricks>)>,
+}
+
+/// [`Banded`] at one structure after some tricks
+struct Band {
+    lo: Tricks,
+    hi: Tricks,
+    /// Per layout and tricks from here, the least a deal of it loses: of
+    /// the root layouts becoming it, the one losing least
+    loss: Vec<Vec<u64>>,
+}
+
 /// The search for one combination, memoized across targets, comparisons and [`Game`]s
 pub struct Solver {
     north: Holding,
@@ -1928,6 +1953,209 @@ impl Solver {
             }
         }
         (out, kept && budget == u64::MAX)
+    }
+
+    /// Per layout of `st`, after `won` tricks, the tricks from here
+    /// between which comparisons in `b` change, and what each loses
+    fn band(&mut self, b: &mut Banded, st: &State, s: &Structure, won: u8) -> Rc<Band> {
+        let key = (st.live(), won);
+        if let Some(band) = b.bands.get(&key) {
+            return Rc::clone(band);
+        }
+        let map: Rc<[usize]> = match self.maps.get(&(b.live, key.0)) {
+            Some(map) => Rc::clone(map),
+            None => {
+                let map: Rc<[usize]> = self.structure(b.live).map_to(s).into();
+                self.maps.insert((b.live, key.0), Rc::clone(&map));
+                map
+            }
+        };
+        let cap = Self::cap(st);
+        let (mut lo, mut hi) = (vec![u8::MAX; s.len], vec![0; s.len]);
+        let mut loss = vec![vec![u64::MAX; usize::from(cap) + 1]; s.len];
+        for (r, &j) in map.iter().enumerate() {
+            lo[j] = lo[j].min(b.lo[r]);
+            hi[j] = hi[j].max(b.hi[r]);
+            for (v, l) in loss[j].iter_mut().enumerate() {
+                let x = (usize::from(won) + v).min(b.loss[r].len() - 1);
+                *l = (*l).min(b.loss[r][x]);
+            }
+        }
+        let (mut l, mut h) = (Tricks::ZERO, Tricks::ZERO);
+        for j in 0..s.len {
+            if lo[j] != u8::MAX {
+                l.set(j, lo[j].saturating_sub(won).min(cap));
+                h.set(j, hi[j].saturating_sub(won).min(cap));
+            } else {
+                loss[j].fill(0);
+            }
+        }
+        let band = Rc::new(Band { lo: l, hi: h, loss });
+        b.bands.insert(key, Rc::clone(&band));
+        band
+    }
+
+    /// [`feasible`](Self::feasible) with tricks clamped per layout to the
+    /// [`band`](Self::band) of `b`: every way a line can compare with the
+    /// lines of `b`, after `won` tricks
+    fn banded(&mut self, b: &mut Banded, st: State, won: u8, budget: u64) -> Vec<Tricks> {
+        if let Some((kept, v)) = b.memo.get(&(st, won))
+            && *kept >= budget
+        {
+            return v.clone();
+        }
+        let s = self.structure(st.live());
+        let c = Self::consistent(&st, &s);
+        let band = self.band(b, &st, &s, won);
+        let clamp = |v: &mut Tricks, i: usize| {
+            v.set(i, v.get(i).clamp(band.lo.get(i), band.hi.get(i)));
+        };
+        let w = self.post(&st, &s);
+        // At least what a vector loses at the root, however play got here
+        let lost = |v: &Tricks| -> u64 {
+            c.iter()
+                .map(|i| {
+                    w[i] * band.loss[i][usize::from(v.get(i).min(127)).min(band.loss[i].len() - 1)]
+                })
+                .sum()
+        };
+        let out = if st.is_over() {
+            let mut v = Tricks::ZERO;
+            for i in c.iter() {
+                clamp(&mut v, i);
+            }
+            vec![v]
+        } else if Self::is_declarer_turn(&st) {
+            let mut all = Vec::new();
+            for (ch, _, _) in self.declarer_moves(&st, &s) {
+                all.extend(self.banded(b, ch, won, budget));
+            }
+            let mut out = maximal(all, s.len, None);
+            out.retain(|v| lost(v) <= budget);
+            out
+        } else {
+            let mut start = Tricks::ZERO;
+            for i in c.iter() {
+                start.set(i, 127);
+            }
+            let mut subs = Vec::new();
+            for (_, g, ch, w) in self.defender_moves(&st, &s, c) {
+                let map = self.map(&st, &ch);
+                let bonus = u8::from(w);
+                let vs = self.banded(b, ch, won + bonus, budget);
+                let sub = maximal(
+                    vs.iter()
+                        .map(|y| {
+                            let mut p = Tricks::ZERO;
+                            for i in g.iter() {
+                                p.set(i, y.get(map[i]) + bonus);
+                                clamp(&mut p, i);
+                            }
+                            p
+                        })
+                        .collect(),
+                    s.len,
+                    None,
+                );
+                for i in g.iter() {
+                    let most = sub.iter().map(|p| p.get(i)).max().unwrap_or(0);
+                    start.set(i, start.get(i).min(most));
+                }
+                let mut mask = Tricks::ZERO;
+                for i in g.iter() {
+                    mask.set(i, 0xFF);
+                }
+                subs.push((mask, sub));
+            }
+            let words = s.len.div_ceil(8);
+            let mut acc = vec![start];
+            for (mask, sub) in &subs {
+                let mut next = Vec::new();
+                for x in &acc {
+                    next.extend(maximal(
+                        sub.iter().map(|y| x.min_on(y, mask, words)).collect(),
+                        s.len,
+                        None,
+                    ));
+                }
+                acc = maximal(next, s.len, Some(mask));
+                // Lanes still to merge hold at least their final tricks.
+                acc.retain(|v| lost(v) <= budget);
+            }
+            acc
+        };
+        b.memo.insert((st, won), (budget, out.clone()));
+        out
+    }
+
+    /// Prototype: tricks per root layout of some lines, by a beam search
+    #[doc(hidden)]
+    pub fn beam_lines(&mut self, width: usize) -> Vec<Vec<u8>> {
+        let root = self.root();
+        let s = self.structure(root.live());
+        let (vs, _) = self.feasible(root, Cut::Beam(width));
+        vs.iter()
+            .map(|v| (0..s.len).map(|i| v.get(i)).collect())
+            .collect()
+    }
+
+    /// Prototype: the most any line gains over `line` (tricks per root
+    /// layout) under `scoring`, net of what it loses, if at least `least`,
+    /// and how many ways of comparing with it gain that much
+    #[doc(hidden)]
+    pub fn respond(
+        &mut self,
+        scoring: Scoring,
+        line: &[u8],
+        least: i64,
+    ) -> (Option<i64>, usize, Vec<u8>) {
+        let root = self.root();
+        let s = self.structure(root.live());
+        let max = self.max_tricks();
+        let phi = |x: u8, t: u8| scoring.gain(x, t) as i64 - scoring.gain(t, x) as i64;
+        // No line takes more on a layout than double dummy.
+        let dd = self.double_dummy();
+        let (mut lo, mut hi) = (vec![0; s.len], vec![0; s.len]);
+        let mut loss = Vec::new();
+        for (r, &t) in line.iter().enumerate() {
+            let most = dd[r].min(max);
+            lo[r] = (0..=max).rev().find(|&x| phi(x, t) == phi(0, t)).unwrap();
+            hi[r] = (0..=max).find(|&x| phi(x, t) == phi(max, t)).unwrap();
+            loss.push(
+                (0..=max)
+                    .map(|x| (phi(most, t) - phi(x.min(most), t)) as u64)
+                    .collect(),
+            );
+        }
+        let c = Self::consistent(&root, &s);
+        let top: i64 = c
+            .iter()
+            .map(|r| s.weight[r] as i64 * phi(dd[r].min(max), line[r]))
+            .sum();
+        if least > top {
+            return (None, 0, Vec::new());
+        }
+        let mut b = Banded {
+            lo,
+            hi,
+            loss,
+            live: root.live(),
+            bands: FxMap::default(),
+            memo: FxMap::default(),
+        };
+        let front = self.banded(&mut b, root, 0, (top - least) as u64);
+        let gain = |z: &Tricks| -> i64 {
+            c.iter()
+                .map(|r| s.weight[r] as i64 * phi(z.get(r), line[r]))
+                .sum()
+        };
+        let best = front.iter().max_by_key(|z| gain(z));
+        let n = front.iter().filter(|z| gain(z) >= least).count();
+        (
+            best.map(gain).filter(|&g| g >= least),
+            n,
+            best.map_or(Vec::new(), |z| (0..s.len).map(|i| z.get(i)).collect()),
+        )
     }
 
     /// `vs` cut to a [`Cut::Beam`]'s width, those losing least first
