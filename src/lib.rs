@@ -1327,8 +1327,8 @@ impl Solver {
     /// next call goes on from where this one stopped.  [`Game`] never
     /// polls it.
     // ponytail: polled between states, so one state whose antichains take
-    // seconds to combine (KJ9753 opposite a void) overruns by that much;
-    // killing the thread or worker is the hard stop.
+    // seconds to combine overruns by that much; killing the thread or
+    // worker is the hard stop.
     pub fn set_interrupt(&mut self, f: impl FnMut(usize) -> bool + 'static) {
         self.interrupt = Some(Box::new(f));
     }
@@ -1770,11 +1770,12 @@ impl Solver {
                 *v += w as i64 * scoring.net(x, line.get(r));
             }
         }
-        let net = |v: &Tricks| -> i64 {
-            c.iter()
-                .map(|i| value[i][usize::from(won + v.get(i))])
-                .sum()
-        };
+        // Per layout and tricks from here
+        let ahead: Vec<Vec<i64>> = value
+            .iter()
+            .map(|v| v[usize::from(won)..].to_vec())
+            .collect();
+        let net = |v: &Tricks| -> i64 { c.iter().map(|i| ahead[i][usize::from(v.get(i))]).sum() };
         let most = won + Self::cap(&st);
         let top: i64 = c.iter().map(|i| value[i][usize::from(most)]).sum();
         // A narrow search's best, and the line's own way on, bound each card
@@ -1798,12 +1799,9 @@ impl Solver {
             let mut exact = false;
             if !self.interrupted {
                 let budget = u64::try_from(top - best).unwrap_or(0);
-                let front = self.banded(&mut b, ch, won, budget);
-                if !self.interrupted {
-                    // Clamped tricks are worth what the tricks are.
-                    best = front.iter().map(net).max().unwrap_or(best).max(best);
-                    exact = true;
-                }
+                // Clamped tricks are worth what the tricks are.
+                self.deepest_from(&mut b, ch, won, budget, &ahead, &mut best);
+                exact = !self.interrupted;
             }
             choices.push(Choice {
                 seat: seat(at),
@@ -1995,29 +1993,7 @@ impl Solver {
         let mut best = None;
         let mut floor = 0;
         for (k, (ch, _, _)) in self.declarer_moves(&root, &s).into_iter().enumerate() {
-            let Some((start, mut subs)) = self.subs(&mut b, &ch, 0, budget) else {
-                break;
-            };
-            subs.sort_by_key(|(_, sub)| sub.len());
-            let mut own = vec![(Tricks::ZERO, Vec::new()); subs.len()];
-            for r in c.iter() {
-                if let Some(j) = subs.iter().rposition(|(m, _)| m.get(r) != 0) {
-                    own[j].0.set(r, 0xFF);
-                    own[j].1.push(r);
-                }
-            }
-            let mut found = None;
-            self.deepest(
-                &subs,
-                &own,
-                start,
-                s.len,
-                &value,
-                &mut floor,
-                &mut found,
-                &mut FxMap::default(),
-            );
-            if let Some(z) = found {
+            if let Some(z) = self.deepest_from(&mut b, ch, 0, budget, &value, &mut floor) {
                 best = Some((k, z));
             }
             if self.interrupted {
@@ -2029,6 +2005,54 @@ impl Solver {
             return Err(());
         }
         Ok(best)
+    }
+
+    /// The way on from `st` in `b`'s search adding up most `value` (per
+    /// layout and tricks from `st`, rising with them), if more than
+    /// `floor`, which it raises to that.  At a defender's turn the merge is
+    /// searched [`deepest`](Self::deepest) first; elsewhere it takes
+    /// [`banded`](Self::banded)'s front.
+    fn deepest_from(
+        &mut self,
+        b: &mut Banded,
+        st: State,
+        won: u8,
+        budget: u64,
+        value: &[Vec<i64>],
+        floor: &mut i64,
+    ) -> Option<Tricks> {
+        let s = self.structure(st.live());
+        let c = Self::consistent(&st, &s);
+        if st.is_over() || Self::is_declarer_turn(&st) {
+            let front = self.banded(b, st, won, budget);
+            let gain = |v: &Tricks| -> i64 {
+                c.iter()
+                    .map(|r| value[r][usize::from(v.get(r)).min(value[r].len() - 1)])
+                    .sum()
+            };
+            let (g, z) = (front.into_iter())
+                .map(|z| (gain(&z), z))
+                .max_by_key(|&(g, _)| g)?;
+            return (g > *floor).then(|| {
+                *floor = g;
+                z
+            });
+        }
+        let (start, mut subs) = self.subs(b, &st, won, budget)?;
+        subs.sort_by_key(|(_, sub)| sub.len());
+        let mut own = vec![(Tricks::ZERO, Vec::new()); subs.len()];
+        for r in c.iter() {
+            if let Some(j) = subs.iter().rposition(|(m, _)| m.get(r) != 0) {
+                own[j].0.set(r, 0xFF);
+                own[j].1.push(r);
+            }
+        }
+        let mut found = None;
+        let mut drops = FxMap::default();
+        self.deepest(
+            &subs, &own, start, s.len, value, floor, &mut found, &mut drops,
+        );
+        found
     }
 
     /// Depth first through a defender's merge of `subs` from `x`: each
@@ -2667,9 +2691,10 @@ impl Solver {
                     ));
                     // One merge can take minutes: reduce as it doubles,
                     // and let the interrupt in each time
-                    // ponytail: a reduction itself is not interrupted, 8 s
-                    // on KJ9753 opposite a void; poll inside `undominated`
-                    // if that matters
+                    // ponytail: a reduction itself is not interrupted (8 s
+                    // on KJ9753 opposite a void's first trick before that
+                    // went depth first); poll inside `undominated` if that
+                    // matters
                     if next.len() > 2 * kept + MERGE_BATCH {
                         if self.poll() {
                             return Vec::new();

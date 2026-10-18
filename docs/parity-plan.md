@@ -499,6 +499,13 @@ later on four holdings at MP and IMPs.  Milliseconds past the first card;
 the first card of `KJ97 / 53` or `KJ9753` opposite a void runs out of its
 3 s and shows what a narrow search finds.
 
+Per-card values at the first card (2026-10-19): `choices` now searches a
+card leading to a defender's turn as the best response does, depth first
+from what the narrow search found with it.  `KJ9753` opposite a void went
+from over 600 s and 2.2 GB unfinished to about 1 s per line, `KJ97 / 53`
+from 5–27 s to 0.7–2.7 s, inside the explorer's 3 s; values identical on
+the four holdings both finish (three lines each at MP).
+
 ### 6. The report
 
 Publish a versioned comparison report: coverage, disagreements, hardware,
