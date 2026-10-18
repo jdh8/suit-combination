@@ -1178,10 +1178,10 @@ fn coarse_oracle_agrees_on_line_comparisons() {
                         continue;
                     };
                     let w: u64 = (0..va.len()).map(|i| weights[i] * gain(va[i], vb[i])).sum();
-                    if c.gain[a][b] != w {
+                    if c.gain(a, b) != w {
                         fails.push(format!(
                             "{name} gain {a} {b}: engine {} oracle {w}",
-                            c.gain[a][b]
+                            c.gain(a, b)
                         ));
                     }
                 }

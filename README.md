@@ -72,10 +72,12 @@ and `--entries NORTH,SOUTH` such as `-,1` (`-` for unlimited), `--rounds N`,
 another, whatever the margin; `Scoring::Imps { contract, vulnerable, need }`
 counts the IMPs won (WBF scale) in a contract made with `need` tricks in the
 suit.  It returns every line on the Pareto front of tricks per layout, each
-with its trick distribution and plan, what each line gains over each other,
-and `best`: the smallest set of lines that beat or tie every line outside
+with its trick distribution, tricks per layout and first card,
+`Comparison::gain(a, b)` for what one line gains over another, and `best`: the smallest set of lines that beat or tie every line outside
 it.  One line there is the best; more mean no single best line, as
-preference can go round in a cycle (`AJ98 / K32` at matchpoints).  Lines
+preference can go round in a cycle (`AJ98 / K32` at matchpoints).
+`Solver::line` builds one line's plan: plans are trees, so building one for
+each of thousands of lines took gigabytes.  Lines
 treat cards declarer cannot yet tell apart alike, as the rest of the engine
 does.  That loses nothing for a target, but at MP or IMPs a line telling
 them apart can take a trick more on a layout:
@@ -199,9 +201,9 @@ search first finds a good line, and the exact search then drops every
 vector that already loses more deals than that line.  The hardest
 combinations known, such as `KQ85` opposite `T73` and `KJ9753` opposite a
 void, take under a second per target.  `Solver::compare` needs the full
-vectors and a plan for every line on the front: about a second on those,
-but on `KJ9753` opposite a void longer than the page waits, and it says
-so.  The web trainer runs the solver in a worker, so
+vectors: under a second for the 3,880 lines of `KJ9753` opposite the 2,
+but `KJ9753` opposite a void and `KQ85` opposite `T73` do not finish in
+five minutes, and the page says so.  The web trainer runs the solver in a worker, so
 the page stays responsive; a random deal is abandoned after two seconds and
 another dealt, and a combination you enter yourself searches ten seconds at a
 time until it finishes or you stop it.  When a search is interrupted its bound comes from

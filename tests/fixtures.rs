@@ -477,13 +477,14 @@ fn comparison_cases() {
         let layouts = solver.layouts();
         // Each line plays as its trick distribution says
         for l in &c.lines {
+            let plan = solver.line(l);
             let a = |target| Analysis {
                 north: n,
                 south: s,
                 target,
                 score: 0,
                 leads: Vec::new(),
-                plan: l.plan.clone(),
+                plan: plan.clone(),
                 guarantee: l.guarantee.clone(),
                 total: c.total,
             };
@@ -518,7 +519,7 @@ fn comparison_cases() {
                 }
             };
             let b = c.best[0];
-            assert_eq!([c.gain[b][v], c.gain[v][b]], gain, "{name}");
+            assert_eq!([c.gain(b, v), c.gain(v, b)], gain, "{name}");
         }
     }
 }

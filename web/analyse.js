@@ -350,9 +350,20 @@ function readScoring() {
   };
 }
 
-// The first card of a line
-function first(plan) {
-  return plan.kind === 'ruff' ? `${plan.seat[0]} ruff` : `${plan.seat[0]} ${cardsText(plan.cards)}`;
+// What line `a` of comparison `c` wins over line `b`, summed by weight
+const gainOf = (c, a, b) => c.lines[a].guarantee
+  .reduce((sum, x, i) => sum + c.weights[i] * c.payoff[x][c.lines[b].guarantee[i]], 0);
+
+// Line `a`'s plan, asked of the worker once it is shown: building a plan
+// for every line takes far longer than the comparison
+function linePlan(j, cmp, a) {
+  cmp.plans ??= [];
+  if (cmp.plans[a] === undefined) {
+    cmp.plans[a] = null;
+    call('line', [a]).then(JSON.parse, (e) => ({ error: e.message }))
+      .then((p) => { cmp.plans[a] = p; if (job === j) show(); });
+  }
+  return cmp.plans[a];
 }
 
 function linesView(j) {
@@ -367,17 +378,20 @@ function linesView(j) {
   const ks = Array.from({ length: j.max }, (_, i) => i + 1);
   const atLeast = (l, k) => l.tricks.slice(k).reduce((s, w) => s + w, 0);
   const rows = cmp.lines.map((l, i) => `<tr data-line="${i}" class="${i === a ? 'chosen' : ''}">
-      <td>${cmp.best.includes(i) ? '★' : ''}</td><td>${i}</td><td>${first(l.plan)}</td>
+      <td>${cmp.best.includes(i) ? '★' : ''}</td><td>${i}</td><td>${l.seat[0]} ${cardsText(l.cards)}</td>
       ${ks.map((k) => `<td class="num">${pct(atLeast(l, k), t)}</td>`).join('')}
-      <td class="num">${i === a ? '' : `+${gain(cmp.gain[i][a])} −${gain(cmp.gain[a][i])}`}</td>
+      <td class="num">${i === a ? '' : `+${gain(gainOf(cmp, i, a))} −${gain(gainOf(cmp, a, i))}`}</td>
       <td>${i === a ? '' : `<button class="mini ${i === b ? 'active' : ''}" data-versus="${i}">vs</button>`}</td></tr>`).join('');
   html += `<p class="note">${cmp.best.length === 1 ? `★ line ${cmp.best[0]} beats or ties every other` : `No single best line: ★ lines ${cmp.best.join(', ')} beat each other in a cycle`} at ${imps ? 'IMPs' : 'matchpoints'}.  Click a line to see it.</p>
     <div class="scroll"><table class="grid lines"><tr><th></th><th>#</th><th>First</th>${ks.map((k) => `<th class="num">≥${k}</th>`).join('')}<th class="num">vs line ${a}${imps ? ' (IMPs)' : ''}</th><th></th></tr>${rows}</table></div>`;
   const line = cmp.lines[a];
   const dist = line.tricks.map((w, k) => (w ? `${k}: ${pct(w, t)}` : '')).filter(Boolean).join(' · ');
   html += `<div class="panel-title">Line ${a}</div><p>Tricks taken: ${dist}</p>`;
-  if (b !== null) html += `<p>Line ${a} wins ${gain(cmp.gain[a][b])} ${imps ? 'IMPs per deal' : 'of deals'} over line ${b} and loses ${gain(cmp.gain[b][a])}.</p>`;
-  html += lineView(j, line.plan);
+  if (b !== null) html += `<p>Line ${a} wins ${gain(gainOf(cmp, a, b))} ${imps ? 'IMPs per deal' : 'of deals'} over line ${b} and loses ${gain(gainOf(cmp, b, a))}.</p>`;
+  const plan = linePlan(j, cmp, a);
+  if (plan === null) html += '<p class="note">Building the line…</p>';
+  else if (plan.error !== undefined) html += `<p class="flag">${plan.error}</p>`;
+  else html += lineView(j, plan);
   const columns = [[`Line ${a}`, line.guarantee]];
   if (b !== null) columns.push([`Line ${b}`, cmp.lines[b].guarantee]);
   return html + layoutsTable(j, columns);

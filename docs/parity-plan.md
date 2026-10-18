@@ -447,11 +447,16 @@ Decided: the trainer grades the plan's own card right, as well as the
 card best afresh from here.  The plan keeps what the whole line needs; a
 fresh look counts every layout still possible as equally likely to be
 here, which falsecards make untrue, so the plan's card is the right one
-when they differ.  The plan itself is unchanged.  Open: the comparison
-of every line on the hardest holdings (`KJ9753` opposite a void) does not
-finish in the browser, where one state's merge holds the worker past any
-budget, nor natively in 72 s at 1.3 GB (stopped); its tab flags the lines
-as not all found.
+when they differ.  The plan itself is unchanged.
+
+Compare made lazy (2026-10-18): a comparison's lines carry their first
+card, not their plan (`Solver::line` builds one, the page asks the worker
+for the line shown), `Comparison::gain(a, b)` replaces the gain matrix, and
+`best` is found among the lines reaching a knockout winner.  `KJ9753 / 2`
+at MP went from 35 s and 19 GB to 0.28 s and 29 MB, `AQ975 / -` from 52 s
+to 0.83 s; the CLI's output is byte-identical on nine comparisons.  Open:
+the search itself does not finish on `KJ9753` opposite a void or `KQ85 /
+T73` (300 s); their tab flags the lines as not all found.
 
 ### 6. The report
 

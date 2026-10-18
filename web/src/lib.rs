@@ -3,7 +3,7 @@
 //! as JSON, and plays the suit out trick by trick.
 
 use contract_bridge::Holding;
-use suit_combination::{Constraints, Error, Game, Scoring, Solver};
+use suit_combination::{Comparison, Constraints, Error, Game, Scoring, Solver};
 use wasm_bindgen::prelude::{JsValue, wasm_bindgen};
 
 #[wasm_bindgen]
@@ -33,6 +33,8 @@ fn memory() -> usize {
 pub struct Trainer {
     solver: Solver,
     game: Option<Game>,
+    /// The last comparison, whose lines [`line`](Self::line) plays out
+    comparison: Option<Comparison>,
     max_tricks: u8,
     /// Milliseconds each analysis may take, if limited
     budget: Option<f64>,
@@ -64,6 +66,7 @@ impl Trainer {
             max_tricks: solver.max_tricks(),
             solver,
             game: None,
+            comparison: None,
             budget: None,
         })
     }
@@ -82,9 +85,22 @@ impl Trainer {
             serde_json::from_str(scoring).map_err(|e| err(format!("scoring: {e}")))?;
         self.arm();
         match self.solver.compare(scoring) {
-            Ok(c) => serde_json::to_string(&c).map_err(err),
+            Ok(c) => {
+                let json = serde_json::to_string(&c).map_err(err);
+                self.comparison = Some(c);
+                json
+            }
             Err(e) => Ok(self.interrupted(e)?.to_string()),
         }
+    }
+
+    /// The `suit_combination::Plan` of line `i` of the last comparison, as
+    /// JSON
+    pub fn line(&mut self, i: usize) -> Result<String, JsValue> {
+        let line = (self.comparison.as_ref())
+            .and_then(|c| c.lines.get(i))
+            .ok_or_else(|| err("no such line"))?;
+        serde_json::to_string(&self.solver.line(line)).map_err(err)
     }
 
     /// Stop the next search at the budget or the memory cap

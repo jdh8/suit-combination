@@ -20,7 +20,7 @@
 
 use contract_bridge::{Holding, Rank, Seat};
 use std::time::{Duration, Instant};
-use suit_combination::{Comparison, Constraints, Error, Plan, Scoring, Solver};
+use suit_combination::{Comparison, Constraints, Error, Scoring, Solver};
 
 fn fail(message: impl std::fmt::Display) -> ! {
     eprintln!("{message}");
@@ -45,12 +45,10 @@ const USAGE: &str = "usage: solve NORTH SOUTH [TARGET|mp|imps CONTRACT NEED] [--
     [--ruffs N,E,S,W]";
 
 /// Prints the lines of `c`, the best, and what it gains over each other
-fn compared(c: &Comparison) {
+fn compared(solver: &mut Solver, c: &Comparison) {
     let per = |x: u64| x as f64 / c.total as f64;
     for (i, l) in c.lines.iter().enumerate() {
-        let Plan::Declarer { seat, cards, .. } = &l.plan else {
-            unreachable!("a line starts with a lead")
-        };
+        let (seat, cards) = (l.seat, l.cards);
         let tricks: Vec<String> = l
             .tricks
             .iter()
@@ -74,11 +72,11 @@ fn compared(c: &Comparison) {
         let scale = if unit.starts_with('%') { 100.0 } else { 1.0 };
         println!(
             "  vs line {i}: wins {:.4}, loses {:.4} {unit}",
-            per(c.gain[b][i]) * scale,
-            per(c.gain[i][b]) * scale
+            per(c.gain(b, i)) * scale,
+            per(c.gain(i, b)) * scale
         );
     }
-    println!("{}", c.lines[b].plan);
+    println!("{}", solver.line(&c.lines[b]));
 }
 
 /// Removes `--flag VALUE` from `args`, returning the value
@@ -210,7 +208,7 @@ fn main() {
             solver.set_interrupt(move |_| Instant::now() >= deadline);
         }
         let c = solver.compare(scoring).unwrap_or_else(|e| fail(e));
-        compared(&c);
+        compared(&mut solver, &c);
         return;
     }
     let targets: Vec<u8> = match rest {

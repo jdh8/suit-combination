@@ -260,7 +260,7 @@ fn imps(points: i32) -> u64 {
     SCALE.iter().filter(|&&t| points >= t).count() as u64
 }
 
-/// One line of a [`Comparison`]
+/// One line of a [`Comparison`]; [`Solver::line`] plays it out
 #[derive(Debug, Clone, PartialEq, Eq)]
 #[cfg_attr(feature = "serde", derive(serde::Serialize))]
 pub struct Line {
@@ -268,8 +268,9 @@ pub struct Line {
     pub tricks: Vec<u64>,
     /// Tricks the line takes on each of [`Solver::layouts`]
     pub guarantee: Vec<u8>,
-    /// The line, its first card included
-    pub plan: Plan,
+    /// The first card: one of `cards` led from `seat`
+    pub seat: Seat,
+    pub cards: Holding,
 }
 
 /// Result of [`Solver::compare`]
@@ -281,16 +282,75 @@ pub struct Comparison {
     /// and more on one, by trick distribution: most weight on the most
     /// tricks first, ties by the next count down
     pub lines: Vec<Line>,
-    /// `gain[a][b]`: what line `a` wins over line `b`, summed over layouts
-    /// by weight: deals for [`Scoring::Matchpoints`], IMPs times deals for
-    /// [`Scoring::Imps`].  Out of `total`.
-    pub gain: Vec<Vec<u64>>,
+    /// `payoff[x][y]`: what `x` tricks win over `y` on one deal: 1 or 0 at
+    /// matchpoints, IMPs at IMPs
+    pub payoff: Vec<Vec<u64>>,
+    /// Weight of each of [`Solver::layouts`] that declarer may face: 0 for
+    /// the layouts no line plays for
+    pub weights: Vec<u64>,
     /// The smallest set of lines that beat or tie every line outside it
-    /// (where `a` beats `b` if `gain[a][b] > gain[b][a]`): one line is the
-    /// best; more mean no single best line, as preference can be cyclic.
+    /// (where `a` beats `b` if [`gain(a, b)`](Self::gain) is more than
+    /// `gain(b, a)`): one line is the best; more mean no single best line,
+    /// as preference can be cyclic.
     pub best: Vec<usize>,
     /// Weight of every layout: [`TOTAL`] without [`Constraints`]
     pub total: u64,
+}
+
+impl Comparison {
+    /// What line `a` wins over line `b`, summed over layouts by weight:
+    /// deals at matchpoints, IMPs times deals at IMPs.  Out of `total`.
+    #[must_use]
+    pub fn gain(&self, a: usize, b: usize) -> u64 {
+        let (x, y) = (&self.lines[a].guarantee, &self.lines[b].guarantee);
+        (self.weights.iter().zip(x).zip(y))
+            .map(|((w, &x), &y)| w * self.payoff[usize::from(x)][usize::from(y)])
+            .sum()
+    }
+
+    /// [`best`](Self::best), from a few rows of gains on a large front
+    fn smith(&self) -> Vec<usize> {
+        let n = self.lines.len();
+        let ge = |a, b| self.gain(a, b) >= self.gain(b, a);
+        // Every best line reaches any line; the last standing beats or ties
+        // those after it, so few lines reach it
+        let c = (1..n).fold(0, |c, x| if ge(c, x) { c } else { x });
+        // The lines reaching `c` (the best among them, as nothing outside
+        // reaches one of them) by "beats or ties"
+        let mut near = vec![c];
+        let mut seen = vec![false; n];
+        seen[c] = true;
+        let mut k = 0;
+        while let Some(&y) = near.get(k) {
+            for (x, seen) in seen.iter_mut().enumerate() {
+                if !*seen && ge(x, y) {
+                    *seen = true;
+                    near.push(x);
+                }
+            }
+            k += 1;
+        }
+        near.sort_unstable();
+        // Those of them reaching every one of them
+        // ponytail: Floyd–Warshall, cubic in the lines reaching `c`: a
+        // hundred or so seen; Tarjan's components if they grow to thousands
+        let m = near.len();
+        let mut reach: Vec<Vec<bool>> = (0..m)
+            .map(|a| (0..m).map(|b| ge(near[a], near[b])).collect())
+            .collect();
+        for k in 0..m {
+            let via = reach[k].clone();
+            for row in reach.iter_mut().filter(|row| row[k]) {
+                for (r, &v) in row.iter_mut().zip(&via) {
+                    *r |= v;
+                }
+            }
+        }
+        (0..m)
+            .filter(|&a| reach[a].iter().all(|&r| r))
+            .map(|a| near[a])
+            .collect()
+    }
 }
 
 /// What declarer knows of the defenders' hands besides the cards they play
@@ -1414,7 +1474,6 @@ impl Solver {
         }
         let s = self.structure(root.live());
         let c = Self::consistent(&root, &s);
-        let goal = Goal::Lines;
         let dist = |v: &Tricks| {
             let mut tricks = vec![0; usize::from(self.max_tricks()) + 1];
             for i in c.iter() {
@@ -1424,56 +1483,63 @@ impl Solver {
         };
         let mut vs: Vec<(Vec<u64>, Tricks)> = vs.into_iter().map(|v| (dist(&v), v)).collect();
         vs.sort_by(|(a, _), (b, _)| b.iter().rev().cmp(a.iter().rev()));
-        let moves = self.declarer_moves(&root, &s);
-        let mut lines = Vec::new();
-        for (tricks, v) in &vs {
-            let &(ch, at, cards) = moves
-                .iter()
-                .find(|&&(ch, _, _)| self.guarantees(ch, v, s.len, goal))
-                .expect("a vector of the root comes from some lead");
-            let then = self.plan(ch, *v, goal);
-            let plan = Self::declarer_step(at, cards, then);
-            lines.push(Line {
-                tricks: tricks.clone(),
-                guarantee: (0..s.len).map(|i| v.get(i)).collect(),
-                plan,
-            });
-        }
-        let gain: Vec<Vec<u64>> = vs
+        let lines = vs
             .iter()
-            .map(|(_, a)| {
-                vs.iter()
-                    .map(|(_, b)| {
-                        c.iter()
-                            .map(|i| s.weight[i] * scoring.gain(a.get(i), b.get(i)))
-                            .sum()
-                    })
-                    .collect()
+            .map(|(tricks, v)| {
+                let (at, cards) = self.first(v);
+                Line {
+                    tricks: tricks.clone(),
+                    guarantee: (0..s.len).map(|i| v.get(i)).collect(),
+                    seat: seat(at),
+                    cards: Holding::from_bits_truncate(cards),
+                }
             })
             .collect();
-        // The lines that reach every line by "beats or ties"
-        // ponytail: Floyd–Warshall, cubic in the lines (a few dozen at most
-        // seen); Tarjan's components if fronts grow to thousands
-        let n = vs.len();
-        let mut reach: Vec<Vec<bool>> = (0..n)
-            .map(|a| (0..n).map(|b| gain[a][b] >= gain[b][a]).collect())
-            .collect();
-        for k in 0..n {
-            let via = reach[k].clone();
-            for row in reach.iter_mut().filter(|row| row[k]) {
-                for (r, &v) in row.iter_mut().zip(&via) {
-                    *r |= v;
-                }
-            }
-        }
-        let best = (0..n).filter(|&a| reach[a].iter().all(|&r| r)).collect();
-        Ok(Comparison {
+        let max = usize::from(self.max_tricks());
+        let mut cmp = Comparison {
             scoring,
             lines,
-            gain,
-            best,
+            payoff: (0..=max as u8)
+                .map(|x| (0..=max as u8).map(|y| scoring.gain(x, y)).collect())
+                .collect(),
+            weights: (0..s.len)
+                .map(|i| if c.contains(i) { s.weight[i] } else { 0 })
+                .collect(),
+            best: Vec::new(),
             total: s.weight.iter().sum(),
-        })
+        };
+        cmp.best = cmp.smith();
+        Ok(cmp)
+    }
+
+    /// A first card of a line taking at least `v` per root layout
+    fn first(&mut self, v: &Tricks) -> (u8, u16) {
+        let root = self.root();
+        let s = self.structure(root.live());
+        let &(_, at, cards) = self
+            .declarer_moves(&root, &s)
+            .iter()
+            .find(|&&(ch, _, _)| self.guarantees(ch, v, s.len, Goal::Lines))
+            .expect("a vector of the root comes from some lead");
+        (at, cards)
+    }
+
+    /// The plan of `line`, a line of [`compare`](Self::compare) on this
+    /// solver; a tree as large as a plan for a target, so built one at a time
+    pub fn line(&mut self, line: &Line) -> Plan {
+        let root = self.root();
+        let s = self.structure(root.live());
+        let mut v = Tricks::ZERO;
+        for (i, &t) in line.guarantee.iter().enumerate() {
+            v.set(i, t);
+        }
+        let moves = self.declarer_moves(&root, &s);
+        let &(ch, at, cards) = moves
+            .iter()
+            .find(|&&(ch, _, _)| self.guarantees(ch, &v, s.len, Goal::Lines))
+            .expect("a line of a comparison on this solver");
+        let then = self.plan(ch, v, Goal::Lines);
+        Self::declarer_step(at, cards, then)
     }
 
     /// Upper bound on the best score for `target` from what an interrupted
